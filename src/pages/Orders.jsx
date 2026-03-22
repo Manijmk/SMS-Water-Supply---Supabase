@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '../supabase/client'
 import toast from 'react-hot-toast'
 
@@ -15,28 +15,44 @@ export default function Orders() {
   const [form, setForm] = useState({ customer_id: '', quantity: 1, delivery_date: today, notes: '' })
   const [saving, setSaving] = useState(false)
 
-  async function loadOrders() {
-    const { data } = await supabase.from('orders')
+  const loadOrders = useCallback(async () => {
+    const { data } = await supabase
+      .from('orders')
       .select('*, customers(name, area, price_per_can)')
       .eq('delivery_date', dateFilter)
       .order('created_at')
     setOrders(data || [])
     setLoading(false)
-  }
+  }, [dateFilter])
 
-  async function loadCustomers() {
+  const loadCustomers = useCallback(async () => {
     const { data } = await supabase.from('customers').select('*').order('name')
     setCustomers(data || [])
-  }
+  }, [])
 
   useEffect(() => {
+    setLoading(true)
     loadOrders()
     loadCustomers()
-    const channel = supabase.channel('orders-page')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, loadOrders)
+
+    // Real-time for orders AND customers
+    const channel = supabase
+      .channel(`orders-${dateFilter}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload) => {
+        // Optimistic instant update — no refetch needed
+        if (payload.eventType === 'INSERT') {
+          setOrders(prev => [...prev, payload.new].filter(o => o.delivery_date === dateFilter))
+        } else if (payload.eventType === 'UPDATE') {
+          setOrders(prev => prev.map(o => o.id === payload.new.id ? { ...o, ...payload.new } : o))
+        } else if (payload.eventType === 'DELETE') {
+          setOrders(prev => prev.filter(o => o.id !== payload.old.id))
+        }
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, loadCustomers)
       .subscribe()
+
     return () => supabase.removeChannel(channel)
-  }, [dateFilter])
+  }, [dateFilter, loadOrders, loadCustomers])
 
   const enriched = orders.map(o => ({
     ...o,
@@ -62,20 +78,32 @@ export default function Orders() {
       status: 'pending'
     })
     if (error) toast.error('Error: ' + error.message)
-    else { toast.success('Order added!'); setModal(false); setForm({ customer_id: '', quantity: 1, delivery_date: today, notes: '' }) }
+    else {
+      toast.success('Order added!')
+      setModal(false)
+      setForm({ customer_id: '', quantity: 1, delivery_date: today, notes: '' })
+    }
     setSaving(false)
   }
 
   async function del(id) {
     if (!confirm('Delete this order?')) return
-    await supabase.from('orders').delete().eq('id', id)
-    toast.success('Deleted')
+    // Optimistic UI — remove instantly
+    setOrders(prev => prev.filter(o => o.id !== id))
+    const { error } = await supabase.from('orders').delete().eq('id', id)
+    if (error) { toast.error('Error deleting'); loadOrders() }
+    else toast.success('Deleted')
   }
 
   async function updateStatus(id, status) {
-    await supabase.from('orders').update({ status }).eq('id', id)
-    const labels = { delivered: '✅ Delivered', cancelled: '❌ Cancelled', out_for_delivery: '🚚 Out for delivery', pending: '⏳ Pending' }
-    toast.success(labels[status] || 'Updated')
+    // Optimistic UI — update instantly without waiting for server
+    setOrders(prev => prev.map(o => o.id === id ? { ...o, status } : o))
+    const { error } = await supabase.from('orders').update({ status }).eq('id', id)
+    if (error) { toast.error('Error updating status'); loadOrders() }
+    else {
+      const labels = { delivered: '✅ Delivered', cancelled: '❌ Cancelled', out_for_delivery: '🚚 Out for delivery', pending: '⏳ Pending' }
+      toast.success(labels[status] || 'Updated')
+    }
   }
 
   if (loading) return <div className="loading"><div className="spinner" />Loading orders...</div>
@@ -108,7 +136,10 @@ export default function Orders() {
           if (!count) return null
           return (
             <div key={area} onClick={() => setAreaFilter(area === areaFilter ? 'All' : area)}
-              style={{ padding: '6px 14px', borderRadius: 99, cursor: 'pointer', fontSize: 13, fontWeight: 700, background: areaFilter === area ? 'var(--sky)' : 'white', color: areaFilter === area ? 'white' : 'var(--sky)', border: '2px solid var(--sky)', transition: 'all 0.15s' }}>
+              style={{ padding: '6px 14px', borderRadius: 99, cursor: 'pointer', fontSize: 13, fontWeight: 700,
+                background: areaFilter === area ? 'var(--sky)' : 'white',
+                color: areaFilter === area ? 'white' : 'var(--sky)',
+                border: '2px solid var(--sky)', transition: 'all 0.15s' }}>
               {area} ({count})
             </div>
           )
@@ -132,7 +163,8 @@ export default function Orders() {
                     <td style={{ color: 'var(--gray-500)', fontSize: 13 }}>{o.notes || '—'}</td>
                     <td>
                       <select value={o.status || 'pending'} onChange={e => updateStatus(o.id, e.target.value)}
-                        style={{ border: '2px solid var(--gray-200)', borderRadius: 6, padding: '4px 8px', fontWeight: 700, fontSize: 13, cursor: 'pointer', color: o.status === 'delivered' ? '#166534' : o.status === 'out_for_delivery' ? '#1e40af' : o.status === 'cancelled' ? '#991b1b' : '#9a3412' }}>
+                        style={{ border: '2px solid var(--gray-200)', borderRadius: 6, padding: '4px 8px', fontWeight: 700, fontSize: 13, cursor: 'pointer',
+                          color: o.status === 'delivered' ? '#166534' : o.status === 'out_for_delivery' ? '#1e40af' : o.status === 'cancelled' ? '#991b1b' : '#9a3412' }}>
                         <option value="pending">⏳ Pending</option>
                         <option value="out_for_delivery">🚚 Out</option>
                         <option value="delivered">✅ Delivered</option>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '../supabase/client'
 
 const today = new Date().toISOString().split('T')[0]
@@ -13,7 +13,7 @@ export default function Reports() {
   const [truckStock, setTruckStock] = useState(null)
   const [loading, setLoading] = useState(true)
 
-  async function loadData() {
+  const fetchAll = useCallback(async () => {
     setLoading(true)
     const [{ data: o }, { data: d }, { data: t }, { data: c }, { data: s }] = await Promise.all([
       supabase.from('orders').select('*').eq('delivery_date', date),
@@ -28,18 +28,37 @@ export default function Reports() {
     setCustomers(c || [])
     setTruckStock(s)
     setLoading(false)
-  }
+  }, [date])
 
   useEffect(() => {
-    loadData()
-    const channel = supabase.channel('reports-page')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, loadData)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, loadData)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, loadData)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'truck_stock' }, loadData)
+    fetchAll()
+
+    const channel = supabase.channel(`reports-${date}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (p) => {
+        if (p.eventType === 'INSERT') setOrders(prev => [...prev, p.new])
+        else if (p.eventType === 'UPDATE') setOrders(prev => prev.map(o => o.id === p.new.id ? { ...o, ...p.new } : o))
+        else if (p.eventType === 'DELETE') setOrders(prev => prev.filter(o => o.id !== p.old.id))
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, (p) => {
+        if (p.eventType === 'INSERT') setDeliveries(prev => [...prev, p.new])
+        else if (p.eventType === 'UPDATE') setDeliveries(prev => prev.map(d => d.id === p.new.id ? { ...d, ...p.new } : d))
+        else if (p.eventType === 'DELETE') setDeliveries(prev => prev.filter(d => d.id !== p.old.id))
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, (p) => {
+        if (p.eventType === 'UPDATE') setTrips(prev => prev.map(t => t.id === p.new.id ? { ...t, ...p.new } : t))
+        else fetchAll()
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'truck_stock' }, (p) => {
+        if (p.new?.date === date) setTruckStock(p.new)
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, (p) => {
+        if (p.eventType === 'UPDATE') setCustomers(prev => prev.map(c => c.id === p.new.id ? { ...c, ...p.new } : c))
+        else fetchAll()
+      })
       .subscribe()
+
     return () => supabase.removeChannel(channel)
-  }, [date])
+  }, [date, fetchAll])
 
   const totalCansOrdered = orders.reduce((s, o) => s + (o.quantity || 0), 0)
   const totalDelivered = deliveries.reduce((s, d) => s + (d.delivered || 0), 0)
@@ -98,7 +117,7 @@ export default function Reports() {
                   { label: '📤 Loaded', value: totalLoaded, color: 'var(--sky)' },
                   { label: '✅ Delivered', value: totalDelivered, color: 'var(--green)' },
                   { label: '📦 Remaining', value: truckRemaining, color: truckRemaining < 0 ? 'var(--red)' : 'var(--orange)' },
-                  { label: '🔄 Empties Back', value: totalEmpties, color: 'var(--sky)' },
+                  { label: '🔄 Empties', value: totalEmpties, color: 'var(--sky)' },
                 ].map(s => (
                   <div key={s.label} style={{ background: 'white', borderRadius: 10, padding: '12px 14px', boxShadow: 'var(--shadow-sm)' }}>
                     <div style={{ fontSize: 12, color: 'var(--gray-500)', fontWeight: 700, marginBottom: 4 }}>{s.label}</div>
@@ -110,10 +129,10 @@ export default function Reports() {
                 <div style={{ height: '100%', borderRadius: 99, background: totalDelivered > truckCans ? 'var(--red)' : 'var(--green)', width: `${Math.min((totalDelivered / truckCans) * 100, 100)}%`, transition: 'width 0.5s ease' }} />
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--gray-500)' }}>
-                <span>{totalDelivered} of {truckCans} cans ({Math.min(Math.round((totalDelivered / truckCans) * 100), 100)}%)</span>
+                <span>{totalDelivered} of {truckCans} ({Math.min(Math.round((totalDelivered / truckCans) * 100), 100)}%)</span>
                 {truckRemaining < 0 && <span style={{ color: 'var(--red)', fontWeight: 700 }}>⚠️ {Math.abs(truckRemaining)} over-delivered!</span>}
-                {truckRemaining === 0 && <span style={{ color: 'var(--green)', fontWeight: 700 }}>✅ All cans accounted for!</span>}
-                {truckRemaining > 0 && <span style={{ color: 'var(--orange)' }}>{truckRemaining} cans remaining</span>}
+                {truckRemaining === 0 && <span style={{ color: 'var(--green)', fontWeight: 700 }}>✅ All accounted for!</span>}
+                {truckRemaining > 0 && <span style={{ color: 'var(--orange)' }}>{truckRemaining} remaining</span>}
               </div>
             </>
           )}
@@ -170,7 +189,7 @@ export default function Reports() {
             </div>
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Trip</th><th>Delivery Boy</th><th>Loaded</th><th>Delivered</th><th>Remaining</th><th>Empties</th><th>Cash</th><th>Status</th></tr></thead>
+                <thead><tr><th>Trip</th><th>Boy</th><th>Loaded</th><th>Delivered</th><th>Remaining</th><th>Empties</th><th>Cash</th><th>Status</th></tr></thead>
                 <tbody>
                   {tripSummary.map((t, i) => (
                     <tr key={i}>

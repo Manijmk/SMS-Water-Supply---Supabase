@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '../supabase/client'
 import toast from 'react-hot-toast'
 
@@ -17,24 +17,46 @@ export default function Trips() {
   const [dateFilter, setDateFilter] = useState(today)
   const [saving, setSaving] = useState(false)
 
-  async function loadData() {
-    const [{ data: t }, { data: d }] = await Promise.all([
-      supabase.from('trips').select('*').eq('date', dateFilter).order('trip_number'),
-      supabase.from('deliveries').select('*').eq('date', dateFilter)
-    ])
-    setTrips(t || [])
-    setDeliveries(d || [])
+  const loadTrips = useCallback(async () => {
+    const { data } = await supabase.from('trips').select('*').eq('date', dateFilter).order('trip_number')
+    setTrips(data || [])
     setLoading(false)
-  }
+  }, [dateFilter])
+
+  const loadDeliveries = useCallback(async () => {
+    const { data } = await supabase.from('deliveries').select('*').eq('date', dateFilter)
+    setDeliveries(data || [])
+  }, [dateFilter])
 
   useEffect(() => {
-    loadData()
-    const channel = supabase.channel('trips-page')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, loadData)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, loadData)
+    setLoading(true)
+    loadTrips()
+    loadDeliveries()
+
+    const channel = supabase
+      .channel(`trips-${dateFilter}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, (payload) => {
+        if (payload.eventType === 'INSERT') {
+          setTrips(prev => [...prev, payload.new].sort((a, b) => a.trip_number - b.trip_number))
+        } else if (payload.eventType === 'UPDATE') {
+          setTrips(prev => prev.map(t => t.id === payload.new.id ? { ...t, ...payload.new } : t))
+        } else if (payload.eventType === 'DELETE') {
+          setTrips(prev => prev.filter(t => t.id !== payload.old.id))
+        }
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, (payload) => {
+        if (payload.eventType === 'INSERT') {
+          setDeliveries(prev => [...prev, payload.new])
+        } else if (payload.eventType === 'UPDATE') {
+          setDeliveries(prev => prev.map(d => d.id === payload.new.id ? { ...d, ...payload.new } : d))
+        } else if (payload.eventType === 'DELETE') {
+          setDeliveries(prev => prev.filter(d => d.id !== payload.old.id))
+        }
+      })
       .subscribe()
+
     return () => supabase.removeChannel(channel)
-  }, [dateFilter])
+  }, [dateFilter, loadTrips, loadDeliveries])
 
   function openAdd() { setForm({ ...EMPTY, date: dateFilter }); setEditing(null); setModal(true) }
   function openEdit(t) { setForm({ ...t }); setEditing(t.id); setModal(true) }
@@ -54,13 +76,18 @@ export default function Trips() {
 
   async function del(id) {
     if (!confirm('Delete this trip?')) return
-    await supabase.from('trips').delete().eq('id', id)
-    toast.success('Deleted')
+    setTrips(prev => prev.filter(t => t.id !== id))
+    const { error } = await supabase.from('trips').delete().eq('id', id)
+    if (error) { toast.error('Error'); loadTrips() }
+    else toast.success('Deleted')
   }
 
   async function updateStatus(id, status) {
-    await supabase.from('trips').update({ status }).eq('id', id)
-    toast.success('Status updated!')
+    // Optimistic instant update
+    setTrips(prev => prev.map(t => t.id === id ? { ...t, status } : t))
+    const { error } = await supabase.from('trips').update({ status }).eq('id', id)
+    if (error) { toast.error('Error'); loadTrips() }
+    else toast.success('Status updated!')
   }
 
   function getTripStats(tripId) {
@@ -116,7 +143,8 @@ export default function Trips() {
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
                     <div style={{ background: 'var(--sky-light)', color: 'var(--ocean)', fontWeight: 800, fontSize: 18, padding: '6px 16px', borderRadius: 8 }}>{t.loaded_cans} cans</div>
                     <select value={t.status || 'pending'} onChange={e => updateStatus(t.id, e.target.value)}
-                      style={{ border: '2px solid var(--gray-200)', borderRadius: 8, padding: '5px 10px', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
+                      style={{ border: '2px solid var(--gray-200)', borderRadius: 8, padding: '5px 10px', fontWeight: 700, fontSize: 13, cursor: 'pointer',
+                        color: t.status === 'completed' ? '#166534' : t.status === 'in_progress' ? '#1e40af' : '#9a3412' }}>
                       <option value="pending">⏳ Pending</option>
                       <option value="in_progress">🚚 In Progress</option>
                       <option value="completed">✅ Completed</option>
@@ -132,7 +160,7 @@ export default function Trips() {
                     <span>✅ Delivered: <strong style={{ color: 'var(--green)' }}>{stats.delivered}</strong></span>
                     <span>📦 Empties: <strong style={{ color: 'var(--sky)' }}>{stats.empties}</strong></span>
                     <span>💰 Cash: <strong style={{ color: 'var(--orange)' }}>₹{stats.cash}</strong></span>
-                    <span>🔄 Remaining: <strong style={{ color: stats.delivered < t.loaded_cans ? 'var(--orange)' : 'var(--green)' }}>{t.loaded_cans - stats.delivered}</strong></span>
+                    <span>🔄 Remaining: <strong style={{ color: t.loaded_cans - stats.delivered > 0 ? 'var(--orange)' : 'var(--green)' }}>{t.loaded_cans - stats.delivered}</strong></span>
                   </div>
                   {t.loaded_cans > 0 && (
                     <div style={{ background: 'var(--gray-100)', borderRadius: 99, height: 8, overflow: 'hidden' }}>

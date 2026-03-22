@@ -10,6 +10,7 @@ const nav = [
   { to: '/trips', icon: '🚚', label: 'Trips' },
   { to: '/deliveries', icon: '📦', label: 'Deliveries' },
   { to: '/reports', icon: '📊', label: 'Reports' },
+  { to: '/users', icon: '👤', label: 'Users' },
 ]
 
 export default function AdminLayout() {

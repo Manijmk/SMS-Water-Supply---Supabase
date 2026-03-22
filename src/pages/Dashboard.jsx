@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '../supabase/client'
 import toast from 'react-hot-toast'
 
@@ -13,7 +13,7 @@ export default function Dashboard() {
   const [stockInput, setStockInput] = useState('')
   const [loading, setLoading] = useState(true)
 
-  async function fetchAll() {
+  const fetchAll = useCallback(async () => {
     const [{ data: c }, { data: o }, { data: d }, { data: t }] = await Promise.all([
       supabase.from('customers').select('id'),
       supabase.from('orders').select('*').eq('delivery_date', today),
@@ -25,19 +25,32 @@ export default function Dashboard() {
     setDeliveries(d || [])
     setTruckStock(t)
     setLoading(false)
-  }
+  }, [])
 
   useEffect(() => {
     fetchAll()
-    // Realtime subscriptions
-    const channel = supabase.channel('dashboard')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, fetchAll)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, fetchAll)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'truck_stock' }, fetchAll)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, fetchAll)
+
+    const channel = supabase.channel('dashboard-live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload) => {
+        if (payload.eventType === 'INSERT') setOrders(prev => [...prev, payload.new])
+        else if (payload.eventType === 'UPDATE') setOrders(prev => prev.map(o => o.id === payload.new.id ? { ...o, ...payload.new } : o))
+        else if (payload.eventType === 'DELETE') setOrders(prev => prev.filter(o => o.id !== payload.old.id))
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, (payload) => {
+        if (payload.eventType === 'INSERT') setDeliveries(prev => [...prev, payload.new])
+        else if (payload.eventType === 'UPDATE') setDeliveries(prev => prev.map(d => d.id === payload.new.id ? { ...d, ...payload.new } : d))
+        else if (payload.eventType === 'DELETE') setDeliveries(prev => prev.filter(d => d.id !== payload.old.id))
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, () => {
+        supabase.from('customers').select('id').then(({ data }) => setCustomers(data || []))
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'truck_stock' }, (payload) => {
+        if (payload.new?.date === today) setTruckStock(payload.new)
+      })
       .subscribe()
+
     return () => supabase.removeChannel(channel)
-  }, [])
+  }, [fetchAll])
 
   async function saveTruckStock() {
     if (!stockInput || isNaN(stockInput)) return toast.error('Enter a valid number')
@@ -150,7 +163,7 @@ export default function Dashboard() {
         ))}
       </div>
 
-      {/* Today's Orders */}
+      {/* Live Orders */}
       <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
         <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--gray-100)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h2 style={{ fontSize: 16, fontWeight: 800 }}>Today's Orders <span style={{ fontSize: 12, color: 'var(--green)', fontWeight: 700 }}>● LIVE</span></h2>
@@ -168,7 +181,11 @@ export default function Dashboard() {
                     <td style={{ fontWeight: 700 }}>{o.customer_name || '—'}</td>
                     <td>{o.area || '—'}</td>
                     <td><span className="badge badge-blue">{o.quantity} cans</span></td>
-                    <td><span className={`badge ${o.status === 'delivered' ? 'badge-green' : o.status === 'out_for_delivery' ? 'badge-blue' : o.status === 'cancelled' ? 'badge-red' : 'badge-orange'}`}>{o.status || 'pending'}</span></td>
+                    <td>
+                      <span className={`badge ${o.status === 'delivered' ? 'badge-green' : o.status === 'out_for_delivery' ? 'badge-blue' : o.status === 'cancelled' ? 'badge-red' : 'badge-orange'}`}>
+                        {o.status || 'pending'}
+                      </span>
+                    </td>
                   </tr>
                 ))}
               </tbody>
