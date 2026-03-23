@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
-// import { Analytics } from '@vercel/analytics/react'
+import { Analytics } from '@vercel/analytics/react'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import Login from './pages/Login'
 import Register from './pages/Register'
@@ -57,7 +57,7 @@ export default function App() {
         <Routes>
           {/* Public — NO protection, always show immediately */}
           <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} />
+          <Route path="/register" element={<Register />} /> 
 
           {/* Customer panel */}
           <Route path="/customer" element={
@@ -90,7 +90,7 @@ export default function App() {
 
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
-        {/* <Analytics /> */}
+        <Analytics />
       </BrowserRouter>
     </AuthProvider>
   )
