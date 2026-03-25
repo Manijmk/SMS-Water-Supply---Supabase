@@ -1,198 +1,311 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../supabase/client'
 import toast from 'react-hot-toast'
 
-const today = new Date().toISOString().split('T')[0]
-
 export default function Dashboard() {
-  const [customers, setCustomers] = useState([])
-  const [orders, setOrders] = useState([])
-  const [deliveries, setDeliveries] = useState([])
+  const today = new Date().toISOString().split('T')[0]
+  const [truckCans, setTruckCans] = useState('')
   const [truckStock, setTruckStock] = useState(null)
-  const [editingStock, setEditingStock] = useState(false)
-  const [stockInput, setStockInput] = useState('')
+  const [stats, setStats] = useState({
+    totalCustomers: 0, todayOrders: 0, todayDelivered: 0,
+    todayPending: 0, totalDue: 0, cansDelivered: 0,
+    emptiesCollected: 0, cashCollected: 0, cansLoaded: 0,
+  })
+  const [recentOrders, setRecentOrders] = useState([])
   const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+
+  // Ref to always call latest fetch
+  const fetchRef = useRef(null)
 
   const fetchAll = useCallback(async () => {
-    const [{ data: c }, { data: o }, { data: d }, { data: t }] = await Promise.all([
-      supabase.from('customers').select('id'),
-      supabase.from('orders').select('*').eq('delivery_date', today),
-      supabase.from('deliveries').select('*').eq('date', today),
-      supabase.from('truck_stock').select('*').eq('date', today).maybeSingle()
-    ])
-    setCustomers(c || [])
-    setOrders(o || [])
-    setDeliveries(d || [])
-    setTruckStock(t)
-    setLoading(false)
-  }, [])
+    try {
+      // Parallel fetch all data
+      const [custRes, ordRes, delRes, tripRes, stockRes, dueRes] = await Promise.all([
+        supabase.from('customers').select('*', { count: 'exact', head: true }),
+        supabase.from('orders').select('*').eq('delivery_date', today),
+        supabase.from('deliveries').select('*').eq('date', today),
+        supabase.from('trips').select('loaded_cans').eq('date', today),
+        supabase.from('truck_stock').select('*').eq('date', today).maybeSingle(),
+        supabase.from('customers').select('due_amount'),
+      ])
+
+      const orders = ordRes.data || []
+      const dels = delRes.data || []
+      const trips = tripRes.data || []
+      const stock = stockRes.data  // maybeSingle returns { data: row | null }
+      const dues = dueRes.data || []
+
+      setStats({
+        totalCustomers: custRes.count || 0,
+        todayOrders: orders.length,
+        todayDelivered: orders.filter(o => o.status === 'delivered').length,
+        todayPending: orders.filter(o => ['pending', 'out_for_delivery'].includes(o.status)).length,
+        totalDue: dues.reduce((s, c) => s + (c.due_amount || 0), 0),
+        cansDelivered: dels.reduce((s, d) => s + (d.delivered || 0), 0),
+        emptiesCollected: dels.reduce((s, d) => s + (d.empty_collected || 0), 0),
+        cashCollected: dels.reduce((s, d) => s + (d.payment_received || 0), 0),
+        cansLoaded: trips.reduce((s, t) => s + (t.loaded_cans || 0), 0),
+      })
+
+      // Truck stock — stock is the row directly (or null)
+      setTruckStock(stock || null)
+      if (stock?.total_cans != null) {
+        setTruckCans(stock.total_cans.toString())
+      }
+
+      // Recent orders
+      const { data: recent } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('delivery_date', today)
+        .order('created_at', { ascending: false })
+        .limit(8)
+      setRecentOrders(recent || [])
+    } catch (err) {
+      console.error('Dashboard fetch error:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [today])
+
+  // Keep ref updated
+  useEffect(() => {
+    fetchRef.current = fetchAll
+  }, [fetchAll])
 
   useEffect(() => {
     fetchAll()
 
-    const channel = supabase.channel('dashboard-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload) => {
-        if (payload.eventType === 'INSERT') setOrders(prev => [...prev, payload.new])
-        else if (payload.eventType === 'UPDATE') setOrders(prev => prev.map(o => o.id === payload.new.id ? { ...o, ...payload.new } : o))
-        else if (payload.eventType === 'DELETE') setOrders(prev => prev.filter(o => o.id !== payload.old.id))
+    // Realtime — subscribe to all relevant tables
+    const channel = supabase
+      .channel('dashboard-realtime-' + Date.now())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => {
+        fetchRef.current?.()
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, (payload) => {
-        if (payload.eventType === 'INSERT') setDeliveries(prev => [...prev, payload.new])
-        else if (payload.eventType === 'UPDATE') setDeliveries(prev => prev.map(d => d.id === payload.new.id ? { ...d, ...payload.new } : d))
-        else if (payload.eventType === 'DELETE') setDeliveries(prev => prev.filter(d => d.id !== payload.old.id))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, () => {
+        fetchRef.current?.()
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, () => {
+        fetchRef.current?.()
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'truck_stock' }, () => {
+        fetchRef.current?.()
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, () => {
-        supabase.from('customers').select('id').then(({ data }) => setCustomers(data || []))
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'truck_stock' }, (payload) => {
-        if (payload.new?.date === today) setTruckStock(payload.new)
+        fetchRef.current?.()
       })
       .subscribe()
 
-    return () => supabase.removeChannel(channel)
-  }, [fetchAll])
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [])
 
-  async function saveTruckStock() {
-    if (!stockInput || isNaN(stockInput)) return toast.error('Enter a valid number')
-    const { error } = await supabase.from('truck_stock').upsert({ date: today, total_cans: +stockInput }, { onConflict: 'date' })
-    if (error) return toast.error('Error saving')
-    toast.success('Truck stock saved!')
-    setEditingStock(false)
-    setStockInput('')
+  const saveTruck = async () => {
+    const n = parseInt(truckCans)
+    if (isNaN(n) || n <= 0) return toast.error('Enter valid can count')
+    setSaving(true)
+    try {
+      if (truckStock?.id) {
+        const { error } = await supabase
+          .from('truck_stock')
+          .update({ total_cans: n, recorded_at: new Date().toISOString() })
+          .eq('id', truckStock.id)
+        if (error) throw error
+      } else {
+        const { error } = await supabase
+          .from('truck_stock')
+          .insert({ date: today, total_cans: n })
+        if (error) throw error
+      }
+      toast.success('Truck stock saved!')
+      await fetchAll()
+    } catch (err) {
+      toast.error('Failed to save: ' + (err.message || 'Unknown error'))
+    } finally {
+      setSaving(false)
+    }
   }
 
-  const totalCansOrdered = orders.reduce((s, o) => s + (o.quantity || 0), 0)
-  const totalDelivered = deliveries.reduce((s, d) => s + (d.delivered || 0), 0)
-  const totalCash = deliveries.reduce((s, d) => s + (d.payment_received || 0), 0)
-  const totalEmpties = deliveries.reduce((s, d) => s + (d.empty_collected || 0), 0)
-  const truckCans = truckStock?.total_cans || 0
-  const remaining = truckCans - totalDelivered
-  const pendingOrders = orders.filter(o => o.status !== 'delivered' && o.status !== 'cancelled')
+  const arrived = truckStock?.total_cans || 0
+  const remaining = arrived - stats.cansDelivered
+  const pct = arrived > 0 ? Math.min(100, Math.round((stats.cansDelivered / arrived) * 100)) : 0
 
-  if (loading) return <div className="loading"><div className="spinner" />Loading dashboard...</div>
+  if (loading) {
+    return (
+      <div className="loading-screen">
+        <div className="spinner" />
+        <p>Loading dashboard...</p>
+      </div>
+    )
+  }
 
   return (
-    <div>
+    <>
       <div className="page-header">
-        <div>
-          <h1 className="page-title">Dashboard 🏠</h1>
-          <p className="page-subtitle">{new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
+        <div className="page-header-left">
+          <h1>📊 Dashboard</h1>
+          <p>{new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
         </div>
+        <button className="btn btn-ghost" onClick={fetchAll}>🔄 Refresh</button>
       </div>
 
-      {/* Truck Stock */}
-      <div className="card" style={{ marginBottom: 24, background: 'linear-gradient(135deg, #0369a1, #0ea5e9)', border: 'none', color: 'white' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 700, opacity: 0.85, marginBottom: 8 }}>🚛 TODAY'S TRUCK STOCK</div>
-            {truckStock ? (
-              <div style={{ display: 'flex', gap: 28, flexWrap: 'wrap' }}>
-                {[
-                  { label: 'Cans Arrived', value: truckCans, color: 'white' },
-                  { label: 'Delivered', value: totalDelivered, color: '#bbf7d0' },
-                  { label: remaining < 0 ? '⚠️ Over!' : 'Remaining', value: remaining, color: remaining < 0 ? '#fca5a5' : '#fde68a' },
-                  { label: 'Empties Back', value: totalEmpties, color: '#bfdbfe' },
-                ].map(s => (
-                  <div key={s.label}>
-                    <div style={{ fontSize: 34, fontWeight: 800, fontFamily: "'Baloo 2',cursive", lineHeight: 1, color: s.color }}>{s.value}</div>
-                    <div style={{ fontSize: 12, opacity: 0.8 }}>{s.label}</div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div style={{ fontSize: 15, opacity: 0.85 }}>No truck stock recorded yet for today</div>
-            )}
+      <div className="page-body">
+        {/* Truck Stock */}
+        <div className="card animate-in">
+          <div className="card-header">
+            <h3>🚛 Truck Stock</h3>
+            {truckStock && <span className="badge badge-delivered"><span className="dot" />Recorded</span>}
           </div>
-          <div>
-            {!editingStock ? (
-              <button onClick={() => { setEditingStock(true); setStockInput(truckCans || '') }}
-                style={{ background: 'rgba(255,255,255,0.25)', border: '2px solid rgba(255,255,255,0.5)', color: 'white', padding: '8px 16px', borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
-                {truckStock ? '✏️ Update' : '➕ Enter Stock'}
+          <div className="card-body">
+            <div className="truck-input-row">
+              <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                <label>Cans Arrived Today</label>
+                <input
+                  type="number"
+                  className="form-control"
+                  placeholder="How many cans on the truck?"
+                  value={truckCans}
+                  onChange={e => setTruckCans(e.target.value)}
+                />
+              </div>
+              <button className="btn btn-primary" onClick={saveTruck} disabled={saving}>
+                {saving ? '⏳' : '💾'} Save
               </button>
-            ) : (
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <input type="number" value={stockInput} onChange={e => setStockInput(e.target.value)} placeholder="e.g. 600" autoFocus
-                  style={{ padding: '8px 12px', borderRadius: 8, border: '2px solid rgba(255,255,255,0.5)', background: 'rgba(255,255,255,0.2)', color: 'white', fontFamily: 'Nunito', fontWeight: 700, fontSize: 15, width: 100, outline: 'none' }} />
-                <button onClick={saveTruckStock} style={{ background: '#22c55e', border: 'none', color: 'white', padding: '8px 14px', borderRadius: 8, fontWeight: 700, cursor: 'pointer' }}>✅</button>
-                <button onClick={() => setEditingStock(false)} style={{ background: 'rgba(255,255,255,0.2)', border: 'none', color: 'white', padding: '8px 14px', borderRadius: 8, fontWeight: 700, cursor: 'pointer' }}>✕</button>
-              </div>
+            </div>
+
+            {arrived > 0 && (
+              <>
+                <div className="tally-grid">
+                  <div className="tally-card">
+                    <span className="tally-icon">🚛</span>
+                    <div className="tally-value">{arrived}</div>
+                    <div className="tally-label">Arrived</div>
+                  </div>
+                  <div className="tally-card">
+                    <span className="tally-icon">📦</span>
+                    <div className="tally-value">{stats.cansLoaded}</div>
+                    <div className="tally-label">Loaded</div>
+                  </div>
+                  <div className="tally-card success">
+                    <span className="tally-icon">✅</span>
+                    <div className="tally-value">{stats.cansDelivered}</div>
+                    <div className="tally-label">Delivered</div>
+                  </div>
+                  <div className={`tally-card ${remaining < 0 ? 'danger' : ''}`}>
+                    <span className="tally-icon">📊</span>
+                    <div className="tally-value">{remaining}</div>
+                    <div className="tally-label">Remaining</div>
+                  </div>
+                  <div className="tally-card">
+                    <span className="tally-icon">♻️</span>
+                    <div className="tally-value">{stats.emptiesCollected}</div>
+                    <div className="tally-label">Empties</div>
+                  </div>
+                </div>
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--n-500)', fontWeight: 600, marginBottom: 6 }}>
+                    <span>Delivery Progress</span>
+                    <span>{pct}%</span>
+                  </div>
+                  <div className="progress-track">
+                    <div className={`progress-fill ${remaining < 0 ? 'over' : ''}`} style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+              </>
             )}
           </div>
         </div>
-        {truckStock && truckCans > 0 && (
-          <div style={{ marginTop: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, opacity: 0.85, marginBottom: 6 }}>
-              <span>Delivery progress ({totalDelivered} of {truckCans} cans)</span>
-              <span>{Math.min(Math.round((totalDelivered / truckCans) * 100), 100)}%</span>
-            </div>
-            <div style={{ background: 'rgba(255,255,255,0.2)', borderRadius: 99, height: 10, overflow: 'hidden' }}>
-              <div style={{ height: '100%', borderRadius: 99, background: totalDelivered > truckCans ? '#ef4444' : '#22c55e', width: `${Math.min((totalDelivered / truckCans) * 100, 100)}%`, transition: 'width 0.5s ease' }} />
+
+        {/* Stats Grid */}
+        <div className="stats-grid">
+          <div className="stat-card teal">
+            <div className="stat-icon">👥</div>
+            <div className="stat-info">
+              <div className="stat-value">{stats.totalCustomers}</div>
+              <div className="stat-label">Total Customers</div>
             </div>
           </div>
-        )}
-      </div>
-
-      {/* Stats */}
-      <div className="stat-grid">
-        {[
-          { label: 'Total Customers', value: customers.length, sub: 'Registered', color: 'var(--sky)' },
-          { label: 'Orders Today', value: orders.length, sub: `${pendingOrders.length} pending`, color: 'var(--green)' },
-          { label: 'Cans Ordered', value: totalCansOrdered, sub: 'To deliver', color: 'var(--ocean)' },
-          { label: 'Cash Collected', value: `₹${totalCash}`, sub: 'Today', color: 'var(--orange)' },
-        ].map(s => (
-          <div key={s.label} className="stat-card" style={{ borderTop: `4px solid ${s.color}` }}>
-            <div className="stat-label">{s.label}</div>
-            <div className="stat-value" style={{ color: s.color }}>{s.value}</div>
-            <div className="stat-sub">{s.sub}</div>
+          <div className="stat-card orange">
+            <div className="stat-icon">📋</div>
+            <div className="stat-info">
+              <div className="stat-value">{stats.todayOrders}</div>
+              <div className="stat-label">Today's Orders</div>
+            </div>
           </div>
-        ))}
-      </div>
-
-      {/* Quick Actions */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 12, marginBottom: 28 }}>
-        {[
-          { icon: '👥', label: 'Add Customer', href: '/customers', color: 'var(--sky)' },
-          { icon: '📋', label: 'New Order', href: '/orders', color: 'var(--green)' },
-          { icon: '🚚', label: 'Create Trip', href: '/trips', color: 'var(--ocean)' },
-          { icon: '📊', label: 'View Reports', href: '/reports', color: 'var(--orange)' },
-        ].map(q => (
-          <a key={q.label} href={q.href} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '18px 12px', background: 'white', borderRadius: 'var(--radius)', border: `2px solid ${q.color}20`, boxShadow: 'var(--shadow-sm)', transition: 'all 0.2s', cursor: 'pointer', textDecoration: 'none' }}>
-            <span style={{ fontSize: 26 }}>{q.icon}</span>
-            <span style={{ fontSize: 13, fontWeight: 700, color: q.color }}>{q.label}</span>
-          </a>
-        ))}
-      </div>
-
-      {/* Live Orders */}
-      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--gray-100)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h2 style={{ fontSize: 16, fontWeight: 800 }}>Today's Orders <span style={{ fontSize: 12, color: 'var(--green)', fontWeight: 700 }}>● LIVE</span></h2>
-          <a href="/orders" style={{ fontSize: 13, color: 'var(--sky)', fontWeight: 700 }}>View all →</a>
+          <div className="stat-card emerald">
+            <div className="stat-icon">✅</div>
+            <div className="stat-info">
+              <div className="stat-value">{stats.todayDelivered}</div>
+              <div className="stat-label">Delivered</div>
+            </div>
+          </div>
+          <div className="stat-card amber">
+            <div className="stat-icon">⏳</div>
+            <div className="stat-info">
+              <div className="stat-value">{stats.todayPending}</div>
+              <div className="stat-label">Pending</div>
+            </div>
+          </div>
+          <div className="stat-card violet">
+            <div className="stat-icon">💰</div>
+            <div className="stat-info">
+              <div className="stat-value">₹{stats.cashCollected.toLocaleString()}</div>
+              <div className="stat-label">Cash Today</div>
+            </div>
+          </div>
+          <div className="stat-card rose">
+            <div className="stat-icon">📕</div>
+            <div className="stat-info">
+              <div className="stat-value">₹{stats.totalDue.toLocaleString()}</div>
+              <div className="stat-label">Total Due</div>
+            </div>
+          </div>
         </div>
-        {orders.length === 0 ? (
-          <div className="empty-state"><div className="icon">📋</div><p>No orders for today</p></div>
-        ) : (
-          <div className="table-wrap">
+
+        {/* Recent Orders */}
+        <div className="card animate-in">
+          <div className="card-header">
+            <h3>📋 Recent Orders</h3>
+            <span style={{ fontSize: 12, color: 'var(--n-400)' }}>Auto-refreshes</span>
+          </div>
+          <div className="table-wrapper">
             <table>
-              <thead><tr><th>Customer</th><th>Area</th><th>Qty</th><th>Status</th></tr></thead>
+              <thead>
+                <tr><th>Customer</th><th>Area</th><th>Qty</th><th>Status</th></tr>
+              </thead>
               <tbody>
-                {orders.slice(0, 10).map(o => (
-                  <tr key={o.id}>
-                    <td style={{ fontWeight: 700 }}>{o.customer_name || '—'}</td>
-                    <td>{o.area || '—'}</td>
-                    <td><span className="badge badge-blue">{o.quantity} cans</span></td>
-                    <td>
-                      <span className={`badge ${o.status === 'delivered' ? 'badge-green' : o.status === 'out_for_delivery' ? 'badge-blue' : o.status === 'cancelled' ? 'badge-red' : 'badge-orange'}`}>
-                        {o.status || 'pending'}
-                      </span>
+                {recentOrders.length === 0 ? (
+                  <tr>
+                    <td colSpan={4}>
+                      <div className="empty-state">
+                        <span className="empty-icon">📭</span>
+                        <h3>No orders today</h3>
+                        <p>Orders will appear here in real-time</p>
+                      </div>
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  recentOrders.map(o => (
+                    <tr key={o.id}>
+                      <td><div className="cell-main">{o.customer_name}</div></td>
+                      <td>{o.area}</td>
+                      <td><strong>{o.quantity}</strong></td>
+                      <td>
+                        <span className={`badge badge-${o.status}`}>
+                          <span className="dot" />
+                          {o.status?.replace(/_/g, ' ')}
+                        </span>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
-        )}
+        </div>
       </div>
-    </div>
+    </>
   )
 }

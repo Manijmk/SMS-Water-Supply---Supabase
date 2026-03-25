@@ -1,198 +1,193 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../supabase/client'
 import toast from 'react-hot-toast'
 
-const today = new Date().toISOString().split('T')[0]
-
 export default function Deliveries() {
+  const today = new Date().toISOString().split('T')[0]
   const [deliveries, setDeliveries] = useState([])
   const [trips, setTrips] = useState([])
   const [customers, setCustomers] = useState([])
+  const [orders, setOrders] = useState([])
+  const [date, setDate] = useState(today)
+  const [showModal, setShowModal] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [modal, setModal] = useState(false)
-  const [dateFilter, setDateFilter] = useState(today)
-  const [tripFilter, setTripFilter] = useState('All')
-  const [form, setForm] = useState({ trip_id: '', customer_id: '', delivered: 1, empty_collected: 0, payment_received: 0, payment_mode: 'cash' })
   const [saving, setSaving] = useState(false)
+  const [selCust, setSelCust] = useState(null)
+  const [form, setForm] = useState({
+    trip_id: '', customer_id: '', order_id: '',
+    delivered: 1, empty_collected: 0, payment_received: 0, payment_mode: 'cash'
+  })
 
-  const loadDeliveries = useCallback(async () => {
-    const { data } = await supabase.from('deliveries').select('*').eq('date', dateFilter).order('created_at')
-    setDeliveries(data || [])
-    setLoading(false)
-  }, [dateFilter])
+  const dateRef = useRef(date)
+  const fetchRef = useRef(null)
 
-  const loadTrips = useCallback(async () => {
-    const { data } = await supabase.from('trips').select('*').eq('date', dateFilter).order('trip_number')
-    setTrips(data || [])
-  }, [dateFilter])
+  useEffect(() => { dateRef.current = date }, [date])
 
-  const loadCustomers = useCallback(async () => {
-    const { data } = await supabase.from('customers').select('*').order('name')
-    setCustomers(data || [])
+  const fetchAll = useCallback(async () => {
+    try {
+      const d = dateRef.current
+      const [delRes, tripRes, custRes, ordRes] = await Promise.all([
+        supabase.from('deliveries').select('*').eq('date', d).order('created_at', { ascending: false }),
+        supabase.from('trips').select('*').eq('date', d).order('trip_number'),
+        supabase.from('customers').select('*').order('name'),
+        supabase.from('orders').select('*').eq('delivery_date', d).in('status', ['pending', 'out_for_delivery']),
+      ])
+      setDeliveries(delRes.data || [])
+      setTrips(tripRes.data || [])
+      setCustomers(custRes.data || [])
+      setOrders(ordRes.data || [])
+    } catch (err) {
+      console.error('Fetch deliveries error:', err)
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
+  useEffect(() => { fetchRef.current = fetchAll }, [fetchAll])
+
   useEffect(() => {
-    setLoading(true)
-    // Parallel fetch — all 3 at once
-    Promise.all([loadDeliveries(), loadTrips(), loadCustomers()])
-
+    fetchAll()
     const channel = supabase
-      .channel(`deliveries-${dateFilter}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, (payload) => {
-        if (payload.eventType === 'INSERT') {
-          setDeliveries(prev => [...prev, payload.new])
-        } else if (payload.eventType === 'UPDATE') {
-          setDeliveries(prev => prev.map(d => d.id === payload.new.id ? { ...d, ...payload.new } : d))
-        } else if (payload.eventType === 'DELETE') {
-          setDeliveries(prev => prev.filter(d => d.id !== payload.old.id))
-        }
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, (payload) => {
-        if (payload.eventType === 'UPDATE') {
-          setTrips(prev => prev.map(t => t.id === payload.new.id ? { ...t, ...payload.new } : t))
-        } else {
-          loadTrips()
-        }
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, (payload) => {
-        if (payload.eventType === 'UPDATE') {
-          setCustomers(prev => prev.map(c => c.id === payload.new.id ? { ...c, ...payload.new } : c))
-        } else {
-          loadCustomers()
-        }
-      })
+      .channel('deliveries-rt-' + Date.now())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, () => fetchRef.current?.())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => fetchRef.current?.())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, () => fetchRef.current?.())
       .subscribe()
-
     return () => supabase.removeChannel(channel)
-  }, [dateFilter, loadDeliveries, loadTrips, loadCustomers])
+  }, [])
 
-  const enriched = deliveries.map(d => ({
-    ...d,
-    customer_name: customers.find(c => c.id === d.customer_id)?.name || d.customer_name || '?',
-    trip_label: (() => { const t = trips.find(x => x.id === d.trip_id); return t ? `Trip #${t.trip_number} - ${t.delivery_boy}` : '?' })()
-  }))
+  useEffect(() => { fetchAll() }, [date])
 
-  const filtered = tripFilter === 'All' ? enriched : enriched.filter(d => d.trip_id === tripFilter)
-  const totalDelivered = filtered.reduce((s, d) => s + (d.delivered || 0), 0)
-  const totalCash = filtered.reduce((s, d) => s + (d.payment_received || 0), 0)
-  const totalEmpties = filtered.reduce((s, d) => s + (d.empty_collected || 0), 0)
-  const totalBalance = filtered.reduce((s, d) => s + (d.balance_amount || 0), 0)
-
-  const selectedCustomer = customers.find(c => c.id === form.customer_id)
-  const calculatedAmount = +form.delivered * (selectedCustomer?.price_per_can || 0)
-  const shortfall = calculatedAmount - +form.payment_received
-
-  function f(k, v) {
-    setForm(p => {
-      const updated = { ...p, [k]: v }
-      if (k === 'delivered' || k === 'customer_id') {
-        const cust = customers.find(x => x.id === (k === 'customer_id' ? v : p.customer_id))
-        if (cust) updated.payment_received = +updated.delivered * cust.price_per_can
-      }
-      return updated
-    })
-  }
-
-  async function save() {
-    if (!form.trip_id || !form.customer_id) return toast.error('Select trip and customer')
-    setSaving(true)
-    const c = customers.find(x => x.id === form.customer_id)
-    const calcAmount = +form.delivered * (c?.price_per_can || 0)
-    const balanceAmount = calcAmount - +form.payment_received
-
-    const { data: newDel, error } = await supabase.from('deliveries').insert({
-      trip_id: form.trip_id,
-      customer_id: form.customer_id,
-      customer_name: c?.name,
-      delivered: +form.delivered,
-      empty_collected: +form.empty_collected,
-      payment_received: +form.payment_received,
-      payment_mode: form.payment_mode,
-      balance_amount: balanceAmount,
-      date: dateFilter
-    }).select().single()
-
-    if (error) { toast.error('Error: ' + error.message); setSaving(false); return }
-
-    if (c) {
-      const newEmptyBalance = (c.empty_balance || 0) + (+form.empty_collected) - (+form.delivered)
-      const newDueAmount = (c.due_amount || 0) + balanceAmount
-      await supabase.from('customers').update({ empty_balance: newEmptyBalance, due_amount: newDueAmount }).eq('id', c.id)
+  const pickCust = (id) => {
+    const c = customers.find(x => x.id === id)
+    setSelCust(c || null)
+    setForm(f => ({ ...f, customer_id: id }))
+    const o = orders.find(x => x.customer_id === id)
+    if (o) {
+      setForm(f => ({ ...f, order_id: o.id, delivered: o.quantity || 1 }))
+    } else {
+      setForm(f => ({ ...f, order_id: '' }))
     }
-
-    if (balanceAmount > 0) toast.success(`✅ Recorded! ₹${balanceAmount} added to due`)
-    else if (balanceAmount < 0) toast.success(`✅ Recorded! Customer overpaid ₹${Math.abs(balanceAmount)}`)
-    else toast.success('✅ Full payment received!')
-
-    setModal(false)
-    setForm({ trip_id: '', customer_id: '', delivered: 1, empty_collected: 0, payment_received: 0, payment_mode: 'cash' })
-    setSaving(false)
   }
 
-  if (loading) return <div className="loading"><div className="spinner" />Loading deliveries...</div>
+  const calcAmt = () => (parseInt(form.delivered) || 0) * (selCust?.price_per_can || 40)
+
+  const save = async () => {
+    if (!form.trip_id) return toast.error('Select a trip')
+    if (!form.customer_id) return toast.error('Select a customer')
+    if (!selCust) return toast.error('Customer data not loaded')
+
+    const exp = calcAmt()
+    const paid = parseInt(form.payment_received) || 0
+    const bal = Math.max(0, exp - paid)
+
+    setSaving(true)
+    try {
+      // Insert delivery
+      const { error: delErr } = await supabase.from('deliveries').insert({
+        trip_id: form.trip_id,
+        customer_id: form.customer_id,
+        order_id: form.order_id || null,
+        customer_name: selCust.name,
+        delivered: parseInt(form.delivered) || 0,
+        empty_collected: parseInt(form.empty_collected) || 0,
+        payment_received: paid,
+        balance_amount: bal,
+        payment_mode: form.payment_mode,
+        date: dateRef.current,
+      })
+      if (delErr) throw delErr
+
+      // Update customer due + empties
+      const newDue = (selCust.due_amount || 0) + bal
+      const newEmpties = (selCust.empty_balance || 0) + (parseInt(form.delivered) || 0) - (parseInt(form.empty_collected) || 0)
+      const { error: custErr } = await supabase
+        .from('customers')
+        .update({ due_amount: newDue, empty_balance: newEmpties })
+        .eq('id', selCust.id)
+      if (custErr) console.error('Customer update error:', custErr)
+
+      // Update order status
+      if (form.order_id) {
+        const { error: ordErr } = await supabase
+          .from('orders')
+          .update({ status: 'delivered' })
+          .eq('id', form.order_id)
+        if (ordErr) console.error('Order update error:', ordErr)
+      }
+
+      toast.success(`Delivered to ${selCust.name}!`)
+      setShowModal(false)
+      setSelCust(null)
+      setForm({ trip_id: '', customer_id: '', order_id: '', delivered: 1, empty_collected: 0, payment_received: 0, payment_mode: 'cash' })
+      await fetchAll()
+    } catch (e) {
+      toast.error('Save failed: ' + e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const del = async id => {
+    if (!confirm('Delete this delivery record?')) return
+    try {
+      await supabase.from('deliveries').delete().eq('id', id)
+      toast.success('Deleted')
+    } catch (e) {
+      toast.error('Failed')
+    }
+  }
+
+  const tDel = deliveries.reduce((s, d) => s + (d.delivered || 0), 0)
+  const tCash = deliveries.reduce((s, d) => s + (d.payment_received || 0), 0)
+  const tEmp = deliveries.reduce((s, d) => s + (d.empty_collected || 0), 0)
+
+  if (loading) return <div className="loading-screen"><div className="spinner" /></div>
 
   return (
-    <div>
+    <>
       <div className="page-header">
-        <div>
-          <h1 className="page-title">Deliveries 📦</h1>
-          <p className="page-subtitle">{filtered.length} deliveries • {totalDelivered} cans <span style={{ color: 'var(--green)', fontWeight: 700 }}>● live</span></p>
+        <div className="page-header-left">
+          <h1>📦 Deliveries</h1>
+          <p>{deliveries.length} records · {tDel} cans · ₹{tCash.toLocaleString()}</p>
         </div>
-        <button className="btn btn-primary" onClick={() => setModal(true)}>+ Record Delivery</button>
+        <button className="btn btn-accent" onClick={() => setShowModal(true)}>+ Record Delivery</button>
       </div>
 
-      <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap', alignItems: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'white', border: '2px solid var(--gray-200)', borderRadius: 8, padding: '8px 14px' }}>
-          <span>📅</span>
-          <input type="date" value={dateFilter} onChange={e => setDateFilter(e.target.value)}
-            style={{ border: 'none', fontSize: 14, fontFamily: 'Nunito', outline: 'none' }} />
-        </div>
-        <select className="form-select" style={{ width: 'auto' }} value={tripFilter} onChange={e => setTripFilter(e.target.value)}>
-          <option value="All">All Trips</option>
-          {trips.map(t => <option key={t.id} value={t.id}>Trip #{t.trip_number} — {t.delivery_boy}</option>)}
-        </select>
-      </div>
-
-      <div className="stat-grid" style={{ marginBottom: 20 }}>
-        {[
-          { label: 'Cans Delivered', value: totalDelivered, color: 'var(--green)' },
-          { label: 'Cash Collected', value: `₹${totalCash}`, color: 'var(--orange)' },
-          { label: 'Empties Collected', value: totalEmpties, color: 'var(--sky)' },
-          { label: 'Pending Balance', value: `₹${totalBalance}`, color: totalBalance > 0 ? 'var(--red)' : 'var(--green)' },
-        ].map(s => (
-          <div key={s.label} className="stat-card" style={{ borderTop: `4px solid ${s.color}` }}>
-            <div className="stat-label">{s.label}</div>
-            <div className="stat-value" style={{ color: s.color }}>{s.value}</div>
+      <div className="page-body">
+        <div className="toolbar">
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label>Date</label>
+            <input type="date" className="form-control" value={date} onChange={e => setDate(e.target.value)} />
           </div>
-        ))}
-      </div>
+        </div>
 
-      {filtered.length === 0 ? (
-        <div className="empty-state"><div className="icon">📦</div><p>No deliveries recorded</p></div>
-      ) : (
-        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          <div className="table-wrap">
+        <div className="stats-grid">
+          <div className="stat-card emerald"><div className="stat-icon">📦</div><div className="stat-info"><div className="stat-value">{tDel}</div><div className="stat-label">Cans Delivered</div></div></div>
+          <div className="stat-card teal"><div className="stat-icon">💰</div><div className="stat-info"><div className="stat-value">₹{tCash.toLocaleString()}</div><div className="stat-label">Cash Collected</div></div></div>
+          <div className="stat-card amber"><div className="stat-icon">♻️</div><div className="stat-info"><div className="stat-value">{tEmp}</div><div className="stat-label">Empties</div></div></div>
+        </div>
+
+        <div className="card">
+          <div className="table-wrapper">
             <table>
-              <thead><tr><th>Customer</th><th>Trip</th><th>Delivered</th><th>Empties</th><th>Calc. Amt</th><th>Paid</th><th>Balance</th><th>Mode</th></tr></thead>
+              <thead><tr><th>Customer</th><th>Cans</th><th>Empties</th><th>Expected</th><th>Paid</th><th>Balance</th><th>Mode</th><th></th></tr></thead>
               <tbody>
-                {filtered.map(d => {
-                  const cust = customers.find(c => c.id === d.customer_id)
-                  const calcAmt = d.delivered * (cust?.price_per_can || 0)
-                  const bal = d.balance_amount ?? (calcAmt - d.payment_received)
+                {deliveries.length === 0 ? (
+                  <tr><td colSpan={8}><div className="empty-state"><span className="empty-icon">📦</span><h3>No deliveries</h3></div></td></tr>
+                ) : deliveries.map(d => {
+                  const c = customers.find(x => x.id === d.customer_id)
+                  const exp = (d.delivered || 0) * (c?.price_per_can || 40)
                   return (
                     <tr key={d.id}>
-                      <td style={{ fontWeight: 700 }}>{d.customer_name}</td>
-                      <td style={{ fontSize: 13, color: 'var(--gray-500)' }}>{d.trip_label}</td>
-                      <td><span className="badge badge-green">{d.delivered} cans</span></td>
-                      <td><span className="badge badge-blue">{d.empty_collected}</span></td>
-                      <td style={{ fontWeight: 700 }}>₹{calcAmt}</td>
-                      <td style={{ fontWeight: 700, color: 'var(--green)' }}>₹{d.payment_received}</td>
-                      <td>
-                        {bal > 0 ? <span className="badge badge-red">₹{bal} due</span>
-                          : bal < 0 ? <span className="badge badge-green">₹{Math.abs(bal)} extra</span>
-                          : <span className="badge badge-gray">✅ Clear</span>}
-                      </td>
-                      <td><span className="badge badge-gray">{d.payment_mode}</span></td>
+                      <td><div className="cell-main">{d.customer_name}</div></td>
+                      <td><strong>{d.delivered}</strong></td>
+                      <td>{d.empty_collected}</td>
+                      <td>₹{exp}</td>
+                      <td>₹{d.payment_received}</td>
+                      <td>{d.balance_amount > 0 ? <span className="due-amount">₹{d.balance_amount}</span> : <span className="due-clear">✓</span>}</td>
+                      <td><span className={`badge badge-${d.payment_mode}`}>{d.payment_mode}</span></td>
+                      <td><button className="btn btn-sm btn-ghost" style={{ color: 'var(--rose-500)' }} onClick={() => del(d.id)}>🗑️</button></td>
                     </tr>
                   )
                 })}
@@ -200,86 +195,48 @@ export default function Deliveries() {
             </table>
           </div>
         </div>
-      )}
+      </div>
 
-      {modal && (
-        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setModal(false)}>
-          <div className="modal">
-            <h2 className="modal-title">Record Delivery 📦</h2>
-            <div className="form-group">
-              <label className="form-label">Trip *</label>
-              <select className="form-select" value={form.trip_id} onChange={e => f('trip_id', e.target.value)}>
-                <option value="">Select trip...</option>
-                {trips.map(t => <option key={t.id} value={t.id}>Trip #{t.trip_number} — {t.delivery_boy} ({t.route})</option>)}
-              </select>
-            </div>
-            <div className="form-group">
-              <label className="form-label">Customer *</label>
-              <select className="form-select" value={form.customer_id} onChange={e => f('customer_id', e.target.value)}>
-                <option value="">Select customer...</option>
-                {customers.map(c => (
-                  <option key={c.id} value={c.id}>
-                    {c.name} — {c.area} (₹{c.price_per_can}/can{c.due_amount > 0 ? ` | Due: ₹${c.due_amount}` : ''})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {selectedCustomer && (
-              <div style={{ background: 'var(--sky-pale)', borderRadius: 10, padding: '12px 14px', marginBottom: 16, border: '1px solid var(--sky-light)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-                  <span style={{ fontWeight: 700, color: 'var(--ocean)', fontSize: 13 }}>💰 Rate: ₹{selectedCustomer.price_per_can}/can</span>
-                  <span style={{ fontWeight: 700, color: 'var(--sky)', fontSize: 13 }}>📦 Empty bal: {selectedCustomer.empty_balance}</span>
-                  {selectedCustomer.due_amount > 0 && (
-                    <span style={{ fontWeight: 700, color: 'var(--red)', fontSize: 13, width: '100%' }}>⚠️ Existing due: ₹{selectedCustomer.due_amount}</span>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
+      {showModal && (
+        <div className="modal-overlay" onClick={() => setShowModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header"><h3>Record Delivery</h3><button className="modal-close" onClick={() => setShowModal(false)}>✕</button></div>
+            <div className="modal-body">
               <div className="form-group">
-                <label className="form-label">Cans Delivered *</label>
-                <input className="form-input" type="number" min={0} value={form.delivered} onChange={e => f('delivered', e.target.value)} />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Empty Cans Collected</label>
-                <input className="form-input" type="number" min={0} value={form.empty_collected} onChange={e => f('empty_collected', e.target.value)} />
-              </div>
-            </div>
-
-            {selectedCustomer && +form.delivered > 0 && (
-              <div style={{ background: shortfall === 0 ? '#f0fdf4' : shortfall > 0 ? '#fff7ed' : '#eff6ff', borderRadius: 10, padding: '12px 14px', marginBottom: 12, border: `1px solid ${shortfall === 0 ? '#bbf7d0' : shortfall > 0 ? '#fed7aa' : '#bfdbfe'}` }}>
-                <div style={{ fontWeight: 700, fontSize: 14 }}>📋 {form.delivered} × ₹{selectedCustomer.price_per_can} = <span style={{ color: 'var(--ocean)' }}>₹{calculatedAmount}</span></div>
-                {shortfall > 0 && <div style={{ color: 'var(--red)', fontSize: 13, marginTop: 4 }}>⚠️ Short by ₹{shortfall} — will be added to due</div>}
-                {shortfall < 0 && <div style={{ color: 'var(--sky)', fontSize: 13, marginTop: 4 }}>ℹ️ Overpaid by ₹{Math.abs(shortfall)}</div>}
-                {shortfall === 0 && <div style={{ color: 'var(--green)', fontSize: 13, marginTop: 4 }}>✅ Full payment</div>}
-              </div>
-            )}
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
-              <div className="form-group">
-                <label className="form-label">Cash Received (₹) <span style={{ color: 'var(--sky)', fontSize: 11 }}>(auto-calc)</span></label>
-                <input className="form-input" type="number" min={0} value={form.payment_received} onChange={e => f('payment_received', e.target.value)}
-                  style={{ borderColor: shortfall > 0 ? 'var(--orange)' : shortfall < 0 ? 'var(--sky)' : 'var(--green)' }} />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Payment Mode</label>
-                <select className="form-select" value={form.payment_mode} onChange={e => f('payment_mode', e.target.value)}>
-                  <option value="cash">💵 Cash</option>
-                  <option value="upi">📱 UPI</option>
-                  <option value="credit">📒 Credit</option>
+                <label>Trip *</label>
+                <select className="form-control" value={form.trip_id} onChange={e => setForm({ ...form, trip_id: e.target.value })}>
+                  <option value="">Select trip...</option>
+                  {trips.map(t => <option key={t.id} value={t.id}>Trip #{t.trip_number} — {t.delivery_boy} ({t.vehicle})</option>)}
                 </select>
               </div>
+              <div className="form-group">
+                <label>Customer *</label>
+                <select className="form-control" value={form.customer_id} onChange={e => pickCust(e.target.value)}>
+                  <option value="">Select...</option>
+                  {customers.map(c => <option key={c.id} value={c.id}>{c.name} — {c.area} (₹{c.price_per_can}/can)</option>)}
+                </select>
+              </div>
+              {selCust?.due_amount > 0 && <div className="alert alert-danger">⚠️ Existing due: <strong>₹{selCust.due_amount}</strong></div>}
+              <div className="form-row">
+                <div className="form-group"><label>Cans Delivered</label><input type="number" className="form-control" value={form.delivered} onChange={e => setForm({ ...form, delivered: e.target.value })} min={0} /></div>
+                <div className="form-group"><label>Empties Collected</label><input type="number" className="form-control" value={form.empty_collected} onChange={e => setForm({ ...form, empty_collected: e.target.value })} min={0} /></div>
+              </div>
+              {selCust && <div className="amount-box"><div className="amount-label">Expected Amount</div><div className="amount-value">₹{calcAmt()}</div></div>}
+              <div className="form-row">
+                <div className="form-group"><label>Amount Received (₹)</label><input type="number" className="form-control" value={form.payment_received} onChange={e => setForm({ ...form, payment_received: e.target.value })} min={0} /></div>
+                <div className="form-group"><label>Payment Mode</label><select className="form-control" value={form.payment_mode} onChange={e => setForm({ ...form, payment_mode: e.target.value })}><option value="cash">💵 Cash</option><option value="upi">📱 UPI</option><option value="credit">📕 Credit</option></select></div>
+              </div>
+              {selCust && parseInt(form.payment_received) < calcAmt() && (
+                <div className="alert alert-warning">Shortfall of ₹{calcAmt() - (parseInt(form.payment_received) || 0)} will be added to due</div>
+              )}
             </div>
-
             <div className="modal-footer">
-              <button className="btn btn-ghost" onClick={() => setModal(false)}>Cancel</button>
-              <button className="btn btn-success" onClick={save} disabled={saving}>{saving ? 'Saving...' : '✅ Record Delivery'}</button>
+              <button className="btn btn-ghost" onClick={() => setShowModal(false)}>Cancel</button>
+              <button className="btn btn-success" onClick={save} disabled={saving}>{saving ? '⏳ Saving...' : 'Save Delivery ✓'}</button>
             </div>
           </div>
         </div>
       )}
-    </div>
+    </>
   )
 }

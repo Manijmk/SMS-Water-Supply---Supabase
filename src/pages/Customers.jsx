@@ -1,169 +1,263 @@
-import { useEffect, useState } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../supabase/client'
 import toast from 'react-hot-toast'
 
-const AREAS = ['Tondiarpet', 'New Washermanpet', 'Kaladipet', 'Tollgate', 'Thiruvotriyur']
-const EMPTY = { name: '', phone: '', address: '', area: 'Tondiarpet', type: 'home', price_per_can: 40, empty_balance: 0, credit_enabled: false, due_amount: 0 }
+const AREAS = ['All', 'Tondiarpet', 'New Washermanpet', 'Kaladipet', 'Tollgate', 'Thiruvotriyur']
 
 export default function Customers() {
   const [customers, setCustomers] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [modal, setModal] = useState(false)
-  const [editing, setEditing] = useState(null)
-  const [form, setForm] = useState(EMPTY)
-  const [search, setSearch] = useState('')
-  const [areaFilter, setAreaFilter] = useState('All')
+  const [filtered, setFiltered] = useState([])
+  const [area, setArea] = useState('All')
   const [typeFilter, setTypeFilter] = useState('All')
-  const [dueOnly, setDueOnly] = useState(false)
+  const [search, setSearch] = useState('')
+  const [showModal, setShowModal] = useState(false)
+  const [showDue, setShowDue] = useState(false)
+  const [dueTarget, setDueTarget] = useState(null)
+  const [dueAmt, setDueAmt] = useState('')
+  const [editing, setEditing] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [clearDueModal, setClearDueModal] = useState(null) // customer to clear due
 
-  async function load() {
-    const { data, error } = await supabase.from('customers').select('*').order('name')
-    if (error) toast.error('Error loading customers')
-    else setCustomers(data || [])
-    setLoading(false)
+  const empty = {
+    name: '', phone: '', phone2: '', phone3: '', address: '',
+    area: 'Tondiarpet', type: 'home', price_per_can: 40,
+    empty_balance: 0, due_amount: 0, credit_enabled: false
   }
+  const [form, setForm] = useState(empty)
+
+  const fetchRef = useRef(null)
+
+  const fetchCustomers = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('customers')
+        .select('*')
+        .order('name')
+      if (error) throw error
+      setCustomers(data || [])
+    } catch (err) {
+      console.error('Fetch customers error:', err)
+      toast.error('Failed to load customers')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
 
   useEffect(() => {
-    load()
-    const channel = supabase.channel('customers-page')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, load)
+    fetchRef.current = fetchCustomers
+  }, [fetchCustomers])
+
+  useEffect(() => {
+    fetchCustomers()
+
+    const channel = supabase
+      .channel('customers-rt-' + Date.now())
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'customers' }, (payload) => {
+        setCustomers(prev => [payload.new, ...prev])
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'customers' }, (payload) => {
+        setCustomers(prev => prev.map(c => c.id === payload.new.id ? payload.new : c))
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'customers' }, (payload) => {
+        setCustomers(prev => prev.filter(c => c.id !== payload.old.id))
+      })
       .subscribe()
+
     return () => supabase.removeChannel(channel)
   }, [])
 
-  const filtered = customers
-    .filter(c => areaFilter === 'All' || c.area === areaFilter)
-    .filter(c => typeFilter === 'All' || c.type === typeFilter)
-    .filter(c => !dueOnly || c.due_amount > 0)
-    .filter(c => !search || c.name.toLowerCase().includes(search.toLowerCase()) || c.phone.includes(search))
+  useEffect(() => {
+    let f = [...customers]
+    if (area !== 'All') f = f.filter(c => c.area === area)
+    if (typeFilter !== 'All') f = f.filter(c => c.type === typeFilter)
+    if (search) {
+      const s = search.toLowerCase()
+      f = f.filter(c =>
+        c.name?.toLowerCase().includes(s) ||
+        c.phone?.includes(s) ||
+        c.primary_phone?.includes(s) ||
+        c.address?.toLowerCase().includes(s)
+      )
+    }
+    setFiltered(f)
+  }, [customers, area, typeFilter, search])
 
-  const totalDue = customers.reduce((s, c) => s + (c.due_amount || 0), 0)
-  const customersWithDue = customers.filter(c => c.due_amount > 0).length
+  const openAdd = () => {
+    setEditing(null)
+    setForm(empty)
+    setShowModal(true)
+  }
 
-  function openAdd() { setForm(EMPTY); setEditing(null); setModal(true) }
-  function openEdit(c) { setForm({ ...c }); setEditing(c.id); setModal(true) }
+  const openEdit = (c) => {
+    setEditing(c)
+    setForm({
+      name: c.name || '',
+      phone: c.primary_phone || c.phone || '',
+      phone2: c.phones?.[1] || '',
+      phone3: c.phones?.[2] || '',
+      address: c.address || '',
+      area: c.area || 'Tondiarpet',
+      type: c.type || 'home',
+      price_per_can: c.price_per_can || 40,
+      empty_balance: c.empty_balance || 0,
+      due_amount: c.due_amount || 0,
+      credit_enabled: c.credit_enabled || false,
+    })
+    setShowModal(true)
+  }
 
-  async function save() {
-    if (!form.name || !form.phone) return toast.error('Name and phone are required')
+  const save = async () => {
+    if (!form.name.trim()) return toast.error('Name is required')
     setSaving(true)
-    const { error } = editing
-      ? await supabase.from('customers').update(form).eq('id', editing)
-      : await supabase.from('customers').insert(form)
-    if (error) toast.error('Error: ' + error.message)
-    else { toast.success(editing ? 'Customer updated!' : 'Customer added!'); setModal(false); load() }
-    setSaving(false)
-  }
 
-  async function del(id) {
-    if (!confirm('Delete this customer?')) return
-    const { error } = await supabase.from('customers').delete().eq('id', id)
-    if (error) toast.error('Error deleting')
-    else { toast.success('Deleted!'); load() }
-  }
+    const phones = [form.phone, form.phone2, form.phone3].filter(Boolean)
+    const payload = {
+      name: form.name.trim(),
+      phone: form.phone,
+      primary_phone: form.phone,
+      phones,
+      address: form.address,
+      area: form.area,
+      type: form.type,
+      price_per_can: parseInt(form.price_per_can) || 40,
+      empty_balance: parseInt(form.empty_balance) || 0,
+      due_amount: parseInt(form.due_amount) || 0,
+      credit_enabled: form.credit_enabled,
+    }
 
-  async function clearDue(customer, amount) {
-    // Reduce due amount by the paid amount
-    const newDue = Math.max(0, (customer.due_amount || 0) - amount)
-    const { error } = await supabase.from('customers').update({ due_amount: newDue }).eq('id', customer.id)
-    if (error) toast.error('Error: ' + error.message)
-    else {
-      toast.success(`✅ ₹${amount} cleared! Remaining due: ₹${newDue}`)
-      setClearDueModal(null)
-      load()
+    try {
+      if (editing) {
+        const { error } = await supabase.from('customers').update(payload).eq('id', editing.id)
+        if (error) throw error
+        toast.success('Customer updated!')
+      } else {
+        const { error } = await supabase.from('customers').insert(payload)
+        if (error) throw error
+        toast.success('Customer added!')
+      }
+      setShowModal(false)
+    } catch (e) {
+      toast.error('Save failed: ' + e.message)
+    } finally {
+      setSaving(false)
     }
   }
 
-  const f = (k, v) => setForm(p => ({ ...p, [k]: v }))
+  const del = async (c) => {
+    if (!confirm(`Delete ${c.name}? This cannot be undone.`)) return
+    try {
+      const { error } = await supabase.from('customers').delete().eq('id', c.id)
+      if (error) throw error
+      toast.success('Customer deleted')
+    } catch (e) {
+      toast.error('Delete failed: ' + e.message)
+    }
+  }
 
-  if (loading) return <div className="loading"><div className="spinner" />Loading customers...</div>
+  const collectDue = async () => {
+    const a = parseInt(dueAmt)
+    if (isNaN(a) || a <= 0) return toast.error('Enter valid amount')
+    if (a > dueTarget.due_amount) return toast.error('Amount exceeds due')
+
+    try {
+      const { error } = await supabase
+        .from('customers')
+        .update({ due_amount: dueTarget.due_amount - a })
+        .eq('id', dueTarget.id)
+      if (error) throw error
+      toast.success(`₹${a} collected from ${dueTarget.name}!`)
+      setShowDue(false)
+    } catch (e) {
+      toast.error('Failed: ' + e.message)
+    }
+  }
+
+  if (loading) return <div className="loading-screen"><div className="spinner" /></div>
 
   return (
-    <div>
+    <>
       <div className="page-header">
-        <div>
-          <h1 className="page-title">Customers 👥</h1>
-          <p className="page-subtitle">{customers.length} total customers</p>
+        <div className="page-header-left">
+          <h1>👥 Customers</h1>
+          <p>{customers.length} total · {filtered.length} shown</p>
         </div>
         <button className="btn btn-primary" onClick={openAdd}>+ Add Customer</button>
       </div>
 
-      {/* Due amount summary */}
-      {customersWithDue > 0 && (
-        <div style={{ background: '#fef2f2', border: '2px solid #fecaca', borderRadius: 'var(--radius)', padding: '14px 18px', marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
-          <div>
-            <div style={{ fontWeight: 800, color: 'var(--red)', fontSize: 15 }}>⚠️ Outstanding Dues</div>
-            <div style={{ fontSize: 13, color: '#991b1b', marginTop: 2 }}>{customersWithDue} customers owe a total of ₹{totalDue}</div>
+      <div className="page-body">
+        <div className="toolbar">
+          <div className="search-container">
+            <span className="search-icon">🔍</span>
+            <input
+              className="form-control"
+              placeholder="Search name, phone, address..."
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+            />
           </div>
-          <button className="btn btn-sm" onClick={() => setDueOnly(!dueOnly)}
-            style={{ background: dueOnly ? 'var(--red)' : 'white', color: dueOnly ? 'white' : 'var(--red)', border: '2px solid var(--red)', fontWeight: 700 }}>
-            {dueOnly ? '✕ Show All' : '👁 Show Due Only'}
-          </button>
         </div>
-      )}
 
-      {/* Filters */}
-      <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
-        <div className="search-bar" style={{ flex: 1, minWidth: 200, marginBottom: 0 }}>
-          <span>🔍</span>
-          <input placeholder="Search name or phone..." value={search} onChange={e => setSearch(e.target.value)} />
+        <div className="chip-group">
+          {AREAS.map(a => (
+            <button key={a} className={`chip ${area === a ? 'active' : ''}`} onClick={() => setArea(a)}>
+              {a}
+            </button>
+          ))}
+          <span style={{ width: 2, background: 'var(--n-200)', borderRadius: 2 }} />
+          {['All', 'home', 'shop'].map(t => (
+            <button key={t} className={`chip ${typeFilter === t ? 'active' : ''}`} onClick={() => setTypeFilter(t)}>
+              {t === 'home' ? '🏠 Home' : t === 'shop' ? '🏪 Shop' : 'All Types'}
+            </button>
+          ))}
         </div>
-        <select className="form-select" style={{ width: 'auto' }} value={areaFilter} onChange={e => setAreaFilter(e.target.value)}>
-          <option value="All">All Areas</option>
-          {AREAS.map(a => <option key={a}>{a}</option>)}
-        </select>
-        <select className="form-select" style={{ width: 'auto' }} value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
-          <option value="All">All Types</option>
-          <option value="home">Home</option>
-          <option value="shop">Shop</option>
-        </select>
-      </div>
 
-      {filtered.length === 0 ? (
-        <div className="empty-state"><div className="icon">👥</div><p>No customers found</p></div>
-      ) : (
-        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          <div className="table-wrap">
+        <div className="card">
+          <div className="table-wrapper">
             <table>
               <thead>
                 <tr>
-                  <th>Name</th><th>Phone</th><th>Area</th><th>Type</th>
-                  <th>Rate</th><th>Empty Bal.</th><th>Due Amount</th><th>Actions</th>
+                  <th>Customer</th><th>Phone</th><th>Area</th><th>Type</th>
+                  <th>₹/Can</th><th>Empties</th><th>Due</th><th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map(c => (
+                {filtered.length === 0 ? (
+                  <tr>
+                    <td colSpan={8}>
+                      <div className="empty-state">
+                        <span className="empty-icon">👥</span>
+                        <h3>No customers found</h3>
+                      </div>
+                    </td>
+                  </tr>
+                ) : filtered.map(c => (
                   <tr key={c.id}>
                     <td>
-                      <div style={{ fontWeight: 700 }}>{c.name}</div>
-                      {c.credit_enabled && <div style={{ fontSize: 11, color: 'var(--sky)', fontWeight: 700 }}>Credit enabled</div>}
+                      <div className="cell-main">{c.name}</div>
+                      <div className="cell-sub">{c.address}</div>
                     </td>
-                    <td>{c.phone}</td>
-                    <td><span className="badge badge-blue">{c.area}</span></td>
-                    <td><span className={`badge ${c.type === 'shop' ? 'badge-orange' : 'badge-green'}`}>{c.type}</span></td>
-                    <td style={{ fontWeight: 700 }}>₹{c.price_per_can}</td>
-                    <td style={{ fontWeight: 700, color: c.empty_balance > 0 ? 'var(--orange)' : 'var(--gray-500)' }}>
-                      {c.empty_balance}
+                    <td>{c.primary_phone || c.phone}</td>
+                    <td>{c.area}</td>
+                    <td><span className={`badge badge-${c.type}`}>{c.type}</span></td>
+                    <td>₹{c.price_per_can}</td>
+                    <td>{c.empty_balance || 0}</td>
+                    <td>
+                      {c.due_amount > 0
+                        ? <span className="due-amount">₹{c.due_amount}</span>
+                        : <span className="due-clear">✓ Clear</span>
+                      }
                     </td>
                     <td>
-                      {c.due_amount > 0 ? (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <span className="badge badge-red">₹{c.due_amount} due</span>
-                          <button
-                            onClick={() => setClearDueModal(c)}
-                            style={{ background: 'var(--green)', border: 'none', color: 'white', padding: '3px 8px', borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
-                            Collect
+                      <div className="btn-group">
+                        <button className="btn btn-sm btn-ghost" onClick={() => openEdit(c)}>✏️</button>
+                        {c.due_amount > 0 && (
+                          <button className="btn btn-sm btn-success" onClick={() => { setDueTarget(c); setDueAmt(''); setShowDue(true) }}>
+                            💰
                           </button>
-                        </div>
-                      ) : (
-                        <span className="badge badge-green">✅ Clear</span>
-                      )}
-                    </td>
-                    <td>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <button className="btn btn-ghost btn-sm" onClick={() => openEdit(c)}>✏️</button>
-                        <button className="btn btn-danger btn-sm" onClick={() => del(c.id)}>🗑️</button>
+                        )}
+                        <button className="btn btn-sm btn-ghost" style={{ color: 'var(--rose-500)' }} onClick={() => del(c)}>
+                          🗑️
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -172,108 +266,111 @@ export default function Customers() {
             </table>
           </div>
         </div>
-      )}
+      </div>
 
-      {/* Collect Due Modal */}
-      {clearDueModal && (
-        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setClearDueModal(null)}>
-          <div className="modal">
-            <h2 className="modal-title">💰 Collect Due — {clearDueModal.name}</h2>
-            <div style={{ background: '#fef2f2', borderRadius: 10, padding: '12px 16px', marginBottom: 20 }}>
-              <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--red)' }}>Total due: ₹{clearDueModal.due_amount}</div>
-              <div style={{ fontSize: 13, color: 'var(--gray-500)', marginTop: 4 }}>Enter the amount customer is paying now</div>
+      {/* Add/Edit Modal */}
+      {showModal && (
+        <div className="modal-overlay" onClick={() => setShowModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{editing ? 'Edit Customer' : 'New Customer'}</h3>
+              <button className="modal-close" onClick={() => setShowModal(false)}>✕</button>
             </div>
-            <DueCollectionForm customer={clearDueModal} onClear={clearDue} onClose={() => setClearDueModal(null)} />
-          </div>
-        </div>
-      )}
-
-      {/* Add/Edit Customer Modal */}
-      {modal && (
-        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setModal(false)}>
-          <div className="modal">
-            <h2 className="modal-title">{editing ? 'Edit Customer' : 'Add Customer'}</h2>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
-              <div className="form-group" style={{ gridColumn: '1/-1' }}>
-                <label className="form-label">Full Name *</label>
-                <input className="form-input" value={form.name} onChange={e => f('name', e.target.value)} placeholder="Customer name" />
+            <div className="modal-body">
+              <div className="form-group">
+                <label>Full Name *</label>
+                <input className="form-control" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Customer name" />
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Phone 1 (Primary)</label>
+                  <input className="form-control" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} maxLength={10} placeholder="10 digits" />
+                </div>
+                <div className="form-group">
+                  <label>Phone 2</label>
+                  <input className="form-control" value={form.phone2} onChange={e => setForm({ ...form, phone2: e.target.value })} maxLength={10} />
+                </div>
               </div>
               <div className="form-group">
-                <label className="form-label">Phone *</label>
-                <input className="form-input" value={form.phone} onChange={e => f('phone', e.target.value)} placeholder="9876543210" />
+                <label>Phone 3</label>
+                <input className="form-control" value={form.phone3} onChange={e => setForm({ ...form, phone3: e.target.value })} maxLength={10} />
               </div>
               <div className="form-group">
-                <label className="form-label">Type</label>
-                <select className="form-select" value={form.type} onChange={e => f('type', e.target.value)}>
-                  <option value="home">Home</option>
-                  <option value="shop">Shop</option>
-                </select>
+                <label>Address</label>
+                <textarea className="form-control" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} rows={2} />
               </div>
-              <div className="form-group" style={{ gridColumn: '1/-1' }}>
-                <label className="form-label">Address</label>
-                <input className="form-input" value={form.address || ''} onChange={e => f('address', e.target.value)} placeholder="Full address" />
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Area</label>
+                  <select className="form-control" value={form.area} onChange={e => setForm({ ...form, area: e.target.value })}>
+                    {AREAS.filter(a => a !== 'All').map(a => <option key={a}>{a}</option>)}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Type</label>
+                  <select className="form-control" value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}>
+                    <option value="home">🏠 Home</option>
+                    <option value="shop">🏪 Shop</option>
+                  </select>
+                </div>
               </div>
-              <div className="form-group">
-                <label className="form-label">Area</label>
-                <select className="form-select" value={form.area} onChange={e => f('area', e.target.value)}>
-                  {AREAS.map(a => <option key={a}>{a}</option>)}
-                </select>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Price/Can (₹)</label>
+                  <input type="number" className="form-control" value={form.price_per_can} onChange={e => setForm({ ...form, price_per_can: e.target.value })} />
+                </div>
+                <div className="form-group">
+                  <label>Empty Balance</label>
+                  <input type="number" className="form-control" value={form.empty_balance} onChange={e => setForm({ ...form, empty_balance: e.target.value })} />
+                </div>
               </div>
-              <div className="form-group">
-                <label className="form-label">Price per Can (₹)</label>
-                <input className="form-input" type="number" value={form.price_per_can} onChange={e => f('price_per_can', +e.target.value)} />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Empty Can Balance</label>
-                <input className="form-input" type="number" value={form.empty_balance} onChange={e => f('empty_balance', +e.target.value)} />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Due Amount (₹)</label>
-                <input className="form-input" type="number" value={form.due_amount} onChange={e => f('due_amount', +e.target.value)} />
-              </div>
-              <div className="form-group" style={{ gridColumn: '1/-1', display: 'flex', alignItems: 'center', gap: 10 }}>
-                <input type="checkbox" id="credit" checked={form.credit_enabled} onChange={e => f('credit_enabled', e.target.checked)} />
-                <label htmlFor="credit" style={{ fontWeight: 700, fontSize: 14 }}>Credit enabled (can order without full payment)</label>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Due Amount (₹)</label>
+                  <input type="number" className="form-control" value={form.due_amount} onChange={e => setForm({ ...form, due_amount: e.target.value })} />
+                </div>
+                <div className="form-group" style={{ display: 'flex', alignItems: 'center', paddingTop: 24 }}>
+                  <label className="form-check">
+                    <input type="checkbox" checked={form.credit_enabled} onChange={e => setForm({ ...form, credit_enabled: e.target.checked })} />
+                    Credit Enabled
+                  </label>
+                </div>
               </div>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-ghost" onClick={() => setModal(false)}>Cancel</button>
-              <button className="btn btn-primary" onClick={save} disabled={saving}>{saving ? 'Saving...' : editing ? '✅ Update' : '➕ Add'}</button>
+              <button className="btn btn-ghost" onClick={() => setShowModal(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={save} disabled={saving}>
+                {saving ? '⏳ Saving...' : editing ? 'Save Changes' : 'Add Customer'}
+              </button>
             </div>
           </div>
         </div>
       )}
-    </div>
-  )
-}
 
-// Sub-component for collecting due
-function DueCollectionForm({ customer, onClear, onClose }) {
-  const [amount, setAmount] = useState(customer.due_amount)
-  return (
-    <div>
-      <div className="form-group">
-        <label className="form-label">Amount Collecting (₹)</label>
-        <input className="form-input" type="number" min={1} max={customer.due_amount}
-          value={amount} onChange={e => setAmount(+e.target.value)}
-          style={{ fontSize: 20, fontWeight: 800, borderColor: 'var(--green)' }} />
-      </div>
-      {amount < customer.due_amount && (
-        <div style={{ background: '#fff7ed', borderRadius: 8, padding: '10px 14px', marginBottom: 12, fontSize: 13 }}>
-          <span style={{ fontWeight: 700, color: 'var(--orange)' }}>Remaining due after this: ₹{customer.due_amount - amount}</span>
+      {/* Collect Due Modal */}
+      {showDue && dueTarget && (
+        <div className="modal-overlay" onClick={() => setShowDue(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 400 }}>
+            <div className="modal-header">
+              <h3>💰 Collect Due</h3>
+              <button className="modal-close" onClick={() => setShowDue(false)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <div className="alert alert-warning">
+                <strong>{dueTarget.name}</strong> owes <strong>₹{dueTarget.due_amount}</strong>
+              </div>
+              <div className="form-group">
+                <label>Amount to Collect</label>
+                <input type="number" className="form-control" value={dueAmt} onChange={e => setDueAmt(e.target.value)} placeholder="₹" autoFocus />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-ghost" onClick={() => setShowDue(false)}>Cancel</button>
+              <button className="btn btn-success" onClick={collectDue}>Collect ✓</button>
+            </div>
+          </div>
         </div>
       )}
-      {amount >= customer.due_amount && (
-        <div style={{ background: '#f0fdf4', borderRadius: 8, padding: '10px 14px', marginBottom: 12, fontSize: 13 }}>
-          <span style={{ fontWeight: 700, color: 'var(--green)' }}>✅ Full due amount cleared!</span>
-        </div>
-      )}
-      <div className="modal-footer">
-        <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn btn-success" onClick={() => onClear(customer, amount)}>
-          💰 Collect ₹{amount}
-        </button>
-      </div>
-    </div>
+    </>
   )
 }

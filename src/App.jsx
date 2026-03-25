@@ -1,6 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
-import { Analytics } from '@vercel/analytics/react'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import Login from './pages/Login'
 import Register from './pages/Register'
@@ -15,83 +14,62 @@ import AdminUsers from './pages/AdminUsers'
 import DeliveryBoy from './pages/DeliveryBoy'
 import CustomerPanel from './pages/CustomerPanel'
 
-function Loader() {
-  return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #0ea5e9, #0369a1)' }}>
-      <div style={{ fontSize: 52, marginBottom: 16 }}>💧</div>
-      <div style={{ color: 'white', fontFamily: "'Baloo 2'", fontSize: 20, fontWeight: 700 }}>SMS Water Supply</div>
-      <div style={{ marginTop: 16, display: 'flex', gap: 6 }}>
-        {[0, 1, 2].map(i => (
-          <div key={i} style={{ width: 8, height: 8, borderRadius: '50%', background: 'rgba(255,255,255,0.7)', animation: `bounce 1s ${i * 0.2}s infinite` }} />
-        ))}
-      </div>
-      <style>{`@keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }`}</style>
-    </div>
-  )
-}
-
-// Only used for protected pages — NOT for login/register
 function ProtectedRoute({ children, allowedRoles }) {
   const { user, role, loading } = useAuth()
-
-  if (loading) return <Loader />
-  if (!user) return <Navigate to="/login" replace />
-
+  if (loading) return <div className="loading-screen"><div className="spinner" /><p>Loading...</p></div>
+  if (!user) return <Navigate to="/login" />
   if (allowedRoles && !allowedRoles.includes(role)) {
-    if (role === 'delivery') return <Navigate to="/delivery" replace />
-    if (role === 'customer') return <Navigate to="/customer" replace />
-    return <Navigate to="/" replace />
+    if (role === 'admin') return <Navigate to="/" />
+    if (role === 'delivery') return <Navigate to="/delivery" />
+    return <Navigate to="/customer" />
   }
-
   return children
+}
+
+function AppRoutes() {
+  return (
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route path="/register" element={<Register />} />
+      <Route path="/" element={<ProtectedRoute allowedRoles={['admin']}><AdminLayout /></ProtectedRoute>}>
+        <Route index element={<Dashboard />} />
+        <Route path="customers" element={<Customers />} />
+        <Route path="orders" element={<Orders />} />
+        <Route path="trips" element={<Trips />} />
+        <Route path="deliveries" element={<Deliveries />} />
+        <Route path="reports" element={<Reports />} />
+        <Route path="users" element={<AdminUsers />} />
+      </Route>
+      <Route path="/delivery" element={<ProtectedRoute allowedRoles={['delivery']}><DeliveryBoy /></ProtectedRoute>} />
+      <Route path="/customer" element={<ProtectedRoute allowedRoles={['customer']}><CustomerPanel /></ProtectedRoute>} />
+      <Route path="*" element={<Navigate to="/login" />} />
+    </Routes>
+  )
 }
 
 export default function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
+    <BrowserRouter>
+      <AuthProvider>
+        <AppRoutes />
         <Toaster
           position="top-center"
-          toastOptions={{ style: { fontFamily: 'Nunito', fontWeight: 700, borderRadius: 10 } }}
+          toastOptions={{
+            duration: 3000,
+            style: {
+              borderRadius: '14px',
+              background: '#0f172a',
+              color: '#f1f5f9',
+              fontSize: '14px',
+              fontWeight: '600',
+              padding: '14px 20px',
+              boxShadow: '0 16px 48px rgba(0,0,0,0.15)',
+            },
+            success: { iconTheme: { primary: '#14b8a6', secondary: '#fff' } },
+            error: { iconTheme: { primary: '#f43f5e', secondary: '#fff' } },
+          }}
         />
-        <Routes>
-          {/* Public — NO protection, always show immediately */}
-          <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} /> 
-
-          {/* Customer panel */}
-          <Route path="/customer" element={
-            <ProtectedRoute allowedRoles={['customer']}>
-              <CustomerPanel />
-            </ProtectedRoute>
-          } />
-
-          {/* Delivery boy panel */}
-          <Route path="/delivery" element={
-            <ProtectedRoute allowedRoles={['delivery', 'admin']}>
-              <DeliveryBoy />
-            </ProtectedRoute>
-          } />
-
-          {/* Admin panel */}
-          <Route path="/" element={
-            <ProtectedRoute allowedRoles={['admin']}>
-              <AdminLayout />
-            </ProtectedRoute>
-          }>
-            <Route index element={<Dashboard />} />
-            <Route path="customers" element={<Customers />} />
-            <Route path="orders" element={<Orders />} />
-            <Route path="trips" element={<Trips />} />
-            <Route path="deliveries" element={<Deliveries />} />
-            <Route path="reports" element={<Reports />} />
-            <Route path="users" element={<AdminUsers />} />
-          </Route>
-
-          <Route path="*" element={<Navigate to="/login" replace />} />
-        </Routes>
-        <Analytics />
-      </BrowserRouter>
-    </AuthProvider>
+      </AuthProvider>
+    </BrowserRouter>
   )
 }

@@ -1,217 +1,242 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../supabase/client'
 import toast from 'react-hot-toast'
 
-const AREAS = ['Tondiarpet', 'New Washermanpet', 'Kaladipet', 'Tollgate', 'Thiruvotriyur']
-const today = new Date().toISOString().split('T')[0]
+const AREAS = ['All', 'Tondiarpet', 'New Washermanpet', 'Kaladipet', 'Tollgate', 'Thiruvotriyur']
+const STATUSES = ['pending', 'out_for_delivery', 'delivered', 'cancelled', 'pending_confirmation']
 
 export default function Orders() {
+  const today = new Date().toISOString().split('T')[0]
   const [orders, setOrders] = useState([])
   const [customers, setCustomers] = useState([])
+  const [date, setDate] = useState(today)
+  const [areaF, setAreaF] = useState('All')
+  const [showModal, setShowModal] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [modal, setModal] = useState(false)
-  const [dateFilter, setDateFilter] = useState(today)
-  const [areaFilter, setAreaFilter] = useState('All')
-  const [form, setForm] = useState({ customer_id: '', quantity: 1, delivery_date: today, notes: '' })
   const [saving, setSaving] = useState(false)
+  const [form, setForm] = useState({ customer_id: '', quantity: 1, delivery_date: today, notes: '' })
 
-  const loadOrders = useCallback(async () => {
-    const { data } = await supabase
-      .from('orders')
-      .select('*, customers(name, area, price_per_can)')
-      .eq('delivery_date', dateFilter)
-      .order('created_at')
-    setOrders(data || [])
-    setLoading(false)
-  }, [dateFilter])
+  const dateRef = useRef(date)
+  const fetchRef = useRef(null)
 
-  const loadCustomers = useCallback(async () => {
-    const { data } = await supabase.from('customers').select('*').order('name')
-    setCustomers(data || [])
+  // Keep date ref current
+  useEffect(() => {
+    dateRef.current = date
+  }, [date])
+
+  const fetchOrders = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('delivery_date', dateRef.current)
+        .order('created_at', { ascending: false })
+      if (error) throw error
+      setOrders(data || [])
+    } catch (err) {
+      console.error('Fetch orders error:', err)
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
-  useEffect(() => {
-    setLoading(true)
-    loadOrders()
-    loadCustomers()
+  const fetchCustomers = async () => {
+    const { data } = await supabase.from('customers').select('id,name,area').order('name')
+    setCustomers(data || [])
+  }
 
-    // Real-time for orders AND customers
+  useEffect(() => {
+    fetchRef.current = fetchOrders
+  }, [fetchOrders])
+
+  useEffect(() => {
+    fetchOrders()
+    fetchCustomers()
+
     const channel = supabase
-      .channel(`orders-${dateFilter}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload) => {
-        // Optimistic instant update — no refetch needed
-        if (payload.eventType === 'INSERT') {
-          setOrders(prev => [...prev, payload.new].filter(o => o.delivery_date === dateFilter))
-        } else if (payload.eventType === 'UPDATE') {
-          setOrders(prev => prev.map(o => o.id === payload.new.id ? { ...o, ...payload.new } : o))
-        } else if (payload.eventType === 'DELETE') {
-          setOrders(prev => prev.filter(o => o.id !== payload.old.id))
-        }
+      .channel('orders-rt-' + Date.now())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => {
+        fetchRef.current?.()
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, loadCustomers)
       .subscribe()
 
     return () => supabase.removeChannel(channel)
-  }, [dateFilter, loadOrders, loadCustomers])
+  }, [])
 
-  const enriched = orders.map(o => ({
-    ...o,
-    customer_name: o.customers?.name || o.customer_name || '?',
-    area: o.customers?.area || o.area || '?',
-    price_per_can: o.customers?.price_per_can || 0
-  }))
+  // Refetch when date changes
+  useEffect(() => {
+    fetchOrders()
+  }, [date])
 
-  const filtered = areaFilter === 'All' ? enriched : enriched.filter(o => o.area === areaFilter)
-  const totalCans = filtered.reduce((s, o) => s + (o.quantity || 0), 0)
+  const shown = areaF === 'All' ? orders : orders.filter(o => o.area === areaF)
+  const totalCans = shown.reduce((s, o) => s + (o.quantity || 0), 0)
 
-  async function save() {
-    if (!form.customer_id || !form.quantity) return toast.error('Select customer and quantity')
-    setSaving(true)
+  const add = async () => {
+    if (!form.customer_id) return toast.error('Select a customer')
     const c = customers.find(x => x.id === form.customer_id)
-    const { error } = await supabase.from('orders').insert({
-      customer_id: form.customer_id,
-      customer_name: c?.name,
-      area: c?.area,
-      quantity: +form.quantity,
-      delivery_date: form.delivery_date,
-      notes: form.notes,
-      status: 'pending'
-    })
-    if (error) toast.error('Error: ' + error.message)
-    else {
+    if (!c) return toast.error('Customer not found')
+
+    setSaving(true)
+    try {
+      const { error } = await supabase.from('orders').insert({
+        customer_id: form.customer_id,
+        customer_name: c.name,
+        area: c.area,
+        quantity: parseInt(form.quantity) || 1,
+        delivery_date: form.delivery_date,
+        status: 'pending',
+        notes: form.notes,
+      })
+      if (error) throw error
       toast.success('Order added!')
-      setModal(false)
+      setShowModal(false)
       setForm({ customer_id: '', quantity: 1, delivery_date: today, notes: '' })
+    } catch (e) {
+      toast.error('Failed: ' + e.message)
+    } finally {
+      setSaving(false)
     }
-    setSaving(false)
   }
 
-  async function del(id) {
+  const updateStatus = async (id, s) => {
+    try {
+      const { error } = await supabase.from('orders').update({ status: s }).eq('id', id)
+      if (error) throw error
+      toast.success(`Status → ${s.replace(/_/g, ' ')}`)
+    } catch (e) {
+      toast.error('Update failed: ' + e.message)
+    }
+  }
+
+  const del = async (id) => {
     if (!confirm('Delete this order?')) return
-    // Optimistic UI — remove instantly
-    setOrders(prev => prev.filter(o => o.id !== id))
-    const { error } = await supabase.from('orders').delete().eq('id', id)
-    if (error) { toast.error('Error deleting'); loadOrders() }
-    else toast.success('Deleted')
-  }
-
-  async function updateStatus(id, status) {
-    // Optimistic UI — update instantly without waiting for server
-    setOrders(prev => prev.map(o => o.id === id ? { ...o, status } : o))
-    const { error } = await supabase.from('orders').update({ status }).eq('id', id)
-    if (error) { toast.error('Error updating status'); loadOrders() }
-    else {
-      const labels = { delivered: '✅ Delivered', cancelled: '❌ Cancelled', out_for_delivery: '🚚 Out for delivery', pending: '⏳ Pending' }
-      toast.success(labels[status] || 'Updated')
+    try {
+      const { error } = await supabase.from('orders').delete().eq('id', id)
+      if (error) throw error
+      toast.success('Deleted')
+    } catch (e) {
+      toast.error('Delete failed: ' + e.message)
     }
   }
 
-  if (loading) return <div className="loading"><div className="spinner" />Loading orders...</div>
+  if (loading) return <div className="loading-screen"><div className="spinner" /></div>
 
   return (
-    <div>
+    <>
       <div className="page-header">
-        <div>
-          <h1 className="page-title">Orders 📋</h1>
-          <p className="page-subtitle">{filtered.length} orders • {totalCans} cans <span style={{ color: 'var(--green)', fontWeight: 700 }}>● live</span></p>
+        <div className="page-header-left">
+          <h1>📋 Orders</h1>
+          <p>{shown.length} orders · {totalCans} cans</p>
         </div>
-        <button className="btn btn-primary" onClick={() => setModal(true)}>+ Add Order</button>
+        <button className="btn btn-primary" onClick={() => setShowModal(true)}>+ New Order</button>
       </div>
 
-      <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'white', border: '2px solid var(--gray-200)', borderRadius: 8, padding: '8px 14px' }}>
-          <span>📅</span>
-          <input type="date" value={dateFilter} onChange={e => setDateFilter(e.target.value)}
-            style={{ border: 'none', fontSize: 14, fontFamily: 'Nunito', outline: 'none' }} />
+      <div className="page-body">
+        <div className="toolbar">
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label>Date</label>
+            <input type="date" className="form-control" value={date} onChange={e => setDate(e.target.value)} />
+          </div>
         </div>
-        <select className="form-select" style={{ width: 'auto' }} value={areaFilter} onChange={e => setAreaFilter(e.target.value)}>
-          <option>All</option>
-          {AREAS.map(a => <option key={a}>{a}</option>)}
-        </select>
-      </div>
 
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 20 }}>
-        {AREAS.map(area => {
-          const count = enriched.filter(o => o.area === area).reduce((s, o) => s + o.quantity, 0)
-          if (!count) return null
-          return (
-            <div key={area} onClick={() => setAreaFilter(area === areaFilter ? 'All' : area)}
-              style={{ padding: '6px 14px', borderRadius: 99, cursor: 'pointer', fontSize: 13, fontWeight: 700,
-                background: areaFilter === area ? 'var(--sky)' : 'white',
-                color: areaFilter === area ? 'white' : 'var(--sky)',
-                border: '2px solid var(--sky)', transition: 'all 0.15s' }}>
-              {area} ({count})
-            </div>
-          )
-        })}
-      </div>
+        <div className="chip-group">
+          {AREAS.map(a => (
+            <button key={a} className={`chip ${areaF === a ? 'active' : ''}`} onClick={() => setAreaF(a)}>
+              {a} ({a === 'All' ? orders.length : orders.filter(o => o.area === a).length})
+            </button>
+          ))}
+        </div>
 
-      {filtered.length === 0 ? (
-        <div className="empty-state"><div className="icon">📋</div><p>No orders for this date</p></div>
-      ) : (
-        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          <div className="table-wrap">
+        <div className="card">
+          <div className="table-wrapper">
             <table>
-              <thead><tr><th>Customer</th><th>Area</th><th>Qty</th><th>Amount</th><th>Notes</th><th>Status</th><th></th></tr></thead>
+              <thead>
+                <tr><th>Customer</th><th>Area</th><th>Qty</th><th>Status</th><th>Notes</th><th></th></tr>
+              </thead>
               <tbody>
-                {filtered.map(o => (
+                {shown.length === 0 ? (
+                  <tr>
+                    <td colSpan={6}>
+                      <div className="empty-state">
+                        <span className="empty-icon">📭</span>
+                        <h3>No orders</h3>
+                        <p>No orders for this date</p>
+                      </div>
+                    </td>
+                  </tr>
+                ) : shown.map(o => (
                   <tr key={o.id}>
-                    <td style={{ fontWeight: 700 }}>{o.customer_name}</td>
-                    <td><span className="badge badge-blue">{o.area}</span></td>
-                    <td style={{ fontWeight: 800, color: 'var(--sky-dark)' }}>{o.quantity}</td>
-                    <td>₹{o.quantity * o.price_per_can}</td>
-                    <td style={{ color: 'var(--gray-500)', fontSize: 13 }}>{o.notes || '—'}</td>
+                    <td><div className="cell-main">{o.customer_name}</div></td>
+                    <td>{o.area}</td>
+                    <td><strong>{o.quantity}</strong></td>
                     <td>
-                      <select value={o.status || 'pending'} onChange={e => updateStatus(o.id, e.target.value)}
-                        style={{ border: '2px solid var(--gray-200)', borderRadius: 6, padding: '4px 8px', fontWeight: 700, fontSize: 13, cursor: 'pointer',
-                          color: o.status === 'delivered' ? '#166534' : o.status === 'out_for_delivery' ? '#1e40af' : o.status === 'cancelled' ? '#991b1b' : '#9a3412' }}>
-                        <option value="pending">⏳ Pending</option>
-                        <option value="out_for_delivery">🚚 Out</option>
-                        <option value="delivered">✅ Delivered</option>
-                        <option value="cancelled">❌ Cancelled</option>
+                      <select
+                        className="form-control"
+                        value={o.status}
+                        onChange={e => updateStatus(o.id, e.target.value)}
+                        style={{ padding: '6px 32px 6px 10px', fontSize: 12, width: 'auto', minWidth: 150, borderRadius: '9999px' }}
+                      >
+                        {STATUSES.map(s => (
+                          <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>
+                        ))}
                       </select>
                     </td>
-                    <td><button className="btn btn-danger btn-sm" onClick={() => del(o.id)}>🗑️</button></td>
+                    <td style={{ color: 'var(--n-400)', fontSize: 13 }}>{o.notes || '—'}</td>
+                    <td>
+                      <button className="btn btn-sm btn-ghost" style={{ color: 'var(--rose-500)' }} onClick={() => del(o.id)}>
+                        🗑️
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         </div>
-      )}
+      </div>
 
-      {modal && (
-        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setModal(false)}>
-          <div className="modal">
-            <h2 className="modal-title">Add Order 📋</h2>
-            <div className="form-group">
-              <label className="form-label">Customer *</label>
-              <select className="form-select" value={form.customer_id} onChange={e => setForm(p => ({ ...p, customer_id: e.target.value }))}>
-                <option value="">Select customer...</option>
-                {customers.map(c => <option key={c.id} value={c.id}>{c.name} — {c.area} ({c.type})</option>)}
-              </select>
+      {/* Add Order Modal */}
+      {showModal && (
+        <div className="modal-overlay" onClick={() => setShowModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>New Order</h3>
+              <button className="modal-close" onClick={() => setShowModal(false)}>✕</button>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
+            <div className="modal-body">
               <div className="form-group">
-                <label className="form-label">Quantity *</label>
-                <input className="form-input" type="number" min={1} value={form.quantity} onChange={e => setForm(p => ({ ...p, quantity: e.target.value }))} />
+                <label>Customer *</label>
+                <select className="form-control" value={form.customer_id} onChange={e => setForm({ ...form, customer_id: e.target.value })}>
+                  <option value="">Select customer...</option>
+                  {customers.map(c => (
+                    <option key={c.id} value={c.id}>{c.name} ({c.area})</option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Quantity</label>
+                  <input type="number" className="form-control" value={form.quantity} onChange={e => setForm({ ...form, quantity: e.target.value })} min={1} />
+                </div>
+                <div className="form-group">
+                  <label>Delivery Date</label>
+                  <input type="date" className="form-control" value={form.delivery_date} onChange={e => setForm({ ...form, delivery_date: e.target.value })} />
+                </div>
               </div>
               <div className="form-group">
-                <label className="form-label">Delivery Date</label>
-                <input className="form-input" type="date" value={form.delivery_date} onChange={e => setForm(p => ({ ...p, delivery_date: e.target.value }))} />
+                <label>Notes</label>
+                <textarea className="form-control" value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} rows={2} placeholder="Special instructions..." />
               </div>
-            </div>
-            <div className="form-group">
-              <label className="form-label">Notes (optional)</label>
-              <input className="form-input" value={form.notes} onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} placeholder="Special instructions..." />
             </div>
             <div className="modal-footer">
-              <button className="btn btn-ghost" onClick={() => setModal(false)}>Cancel</button>
-              <button className="btn btn-primary" onClick={save} disabled={saving}>{saving ? 'Saving...' : '➕ Add Order'}</button>
+              <button className="btn btn-ghost" onClick={() => setShowModal(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={add} disabled={saving}>
+                {saving ? '⏳' : 'Add Order →'}
+              </button>
             </div>
           </div>
         </div>
       )}
-    </div>
+    </>
   )
 }

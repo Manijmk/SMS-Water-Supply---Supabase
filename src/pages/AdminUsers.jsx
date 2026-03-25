@@ -1,208 +1,232 @@
-import { useEffect, useState } from 'react'
+import { useState, useEffect } from 'react'
 import { supabase } from '../supabase/client'
 import toast from 'react-hot-toast'
 
-const EMPTY = { name: '', primary_phone: '', phones: [], password: '', is_active: true }
-
 export default function AdminUsers() {
-  const [deliveryBoys, setDeliveryBoys] = useState([])
+  const [dbs, setDbs] = useState([])
+  const [showModal, setShowModal] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [modal, setModal] = useState(false)
-  const [form, setForm] = useState(EMPTY)
-  const [extraPhone, setExtraPhone] = useState(['', '']) // up to 2 extra phones
-  const [saving, setSaving] = useState(false)
-  const [tab, setTab] = useState('boys') // boys | customers
+  const [creating, setCreating] = useState(false)
+  const [form, setForm] = useState({ name: '', phone: '', phone2: '', phone3: '', password: '' })
 
-  async function load() {
-    const { data } = await supabase.from('delivery_boys').select('*').order('name')
-    setDeliveryBoys(data || [])
-    setLoading(false)
+  useEffect(() => { fetchDBs() }, [])
+
+  const fetchDBs = async () => {
+    try {
+      const { data } = await supabase.from('delivery_boys').select('*').order('name')
+      setDbs(data || [])
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setLoading(false)
+    }
   }
 
-  useEffect(() => { load() }, [])
+  const create = async () => {
+    if (!form.name.trim()) return toast.error('Name is required')
+    if (!form.phone || form.phone.length < 10) return toast.error('Enter valid 10-digit phone')
+    if (!form.password) return toast.error('Password is required')
+    if (form.password.length < 6) return toast.error('Password must be at least 6 characters')
 
-  async function createDeliveryBoy(e) {
-    e.preventDefault()
-    if (!form.name || !form.primary_phone || !form.password)
-      return toast.error('Name, phone and password are required')
-    if (form.primary_phone.length !== 10)
-      return toast.error('Enter valid 10-digit phone number')
-    if (form.password.length < 6)
-      return toast.error('Password must be at least 6 characters')
-
-    setSaving(true)
+    setCreating(true)
     try {
-      const allPhones = [form.primary_phone, ...extraPhone.filter(p => p.length === 10)]
-      const email = `${form.primary_phone}@smswater.app`
+      const clean = form.phone.replace(/\D/g, '').slice(-10)
+      const email = `${clean}@smswater.app`
+      const phones = [form.phone, form.phone2, form.phone3].filter(Boolean)
 
-      // Create Supabase auth user
-      // Create auth user with role stored in metadata
-      const { data: authData, error: authError } = await supabase.auth.admin
-        ? await supabase.auth.signUp({ email, password: form.password })
-        : await supabase.auth.signUp({ email, password: form.password })
+      // ★ KEY FIX: Save admin session BEFORE creating new user
+      const { data: { session: adminSession } } = await supabase.auth.getSession()
 
-      if (authError) { toast.error('Auth error: ' + authError.message); setSaving(false); return }
-
-      const userId = authData.user?.id
-      if (!userId) { toast.error('Could not create user'); setSaving(false); return }
-
-      // Insert delivery boy record
-      const { data: boyData, error: boyError } = await supabase.from('delivery_boys').insert({
-        name: form.name,
-        primary_phone: form.primary_phone,
-        phones: allPhones,
-        user_id: userId,
-        is_active: true
-      }).select().single()
-
-      if (boyError) { toast.error('Error: ' + boyError.message); setSaving(false); return }
-
-      // Create user role
-      await supabase.from('user_roles').insert({
-        user_id: userId,
-        role: 'delivery',
-        linked_id: boyData.id
+      // Create auth user for delivery boy
+      const { data: authData, error: authErr } = await supabase.auth.signUp({
+        email,
+        password: form.password,
+        options: {
+          data: {
+            role: 'delivery',
+            name: form.name.trim(),
+          }
+        }
       })
 
-      toast.success(`✅ Account created for ${form.name}!`)
-      setModal(false)
-      setForm(EMPTY)
-      setExtraPhone(['', ''])
-      load()
+      if (authErr) {
+        // Check for specific errors
+        if (authErr.message?.includes('already registered')) {
+          throw new Error('This phone number is already registered')
+        }
+        throw authErr
+      }
+
+      // ★ KEY FIX: Restore admin session immediately
+      if (adminSession) {
+        await supabase.auth.setSession({
+          access_token: adminSession.access_token,
+          refresh_token: adminSession.refresh_token,
+        })
+      }
+
+      const userId = authData?.user?.id || null
+
+      // Insert delivery boy record
+      const { error: dbErr } = await supabase.from('delivery_boys').insert({
+        name: form.name.trim(),
+        phones,
+        primary_phone: clean,
+        user_id: userId,
+        is_active: true,
+      })
+      if (dbErr) throw dbErr
+
+      // Add user role
+      if (userId) {
+        await supabase.from('user_roles').upsert({
+          user_id: userId,
+          role: 'delivery',
+          linked_id: null,
+        })
+      }
+
+      toast.success(`✅ ${form.name} created!\n📱 Login: ${clean}\n🔑 Password: ${form.password}`, { duration: 6000 })
+      setShowModal(false)
+      setForm({ name: '', phone: '', phone2: '', phone3: '', password: '' })
+      fetchDBs()
     } catch (e) {
-      toast.error('Something went wrong: ' + e.message)
+      console.error('Create delivery boy error:', e)
+      toast.error('Failed: ' + (e.message || 'Unknown error'))
+
+      // ★ SAFETY: Try to restore admin session even on error
+      try {
+        const { data: { session } } = await supabase.auth.getSession()
+        if (!session) {
+          toast.error('Session lost — please log in again')
+          window.location.href = '/login'
+        }
+      } catch (_) {}
+    } finally {
+      setCreating(false)
     }
-    setSaving(false)
   }
 
-  async function toggleActive(boy) {
-    await supabase.from('delivery_boys').update({ is_active: !boy.is_active }).eq('id', boy.id)
-    toast.success(boy.is_active ? 'Account deactivated' : 'Account activated')
-    load()
+  const toggle = async db => {
+    try {
+      const { error } = await supabase
+        .from('delivery_boys')
+        .update({ is_active: !db.is_active })
+        .eq('id', db.id)
+      if (error) throw error
+      toast.success(`${db.name} ${db.is_active ? 'deactivated' : 'activated'}`)
+      fetchDBs()
+    } catch (e) {
+      toast.error('Failed: ' + e.message)
+    }
   }
 
-  if (loading) return <div className="loading"><div className="spinner" />Loading...</div>
+  const del = async db => {
+    if (!confirm(`Delete ${db.name}? This cannot be undone.`)) return
+    try {
+      const { error } = await supabase.from('delivery_boys').delete().eq('id', db.id)
+      if (error) throw error
+      toast.success('Deleted')
+      fetchDBs()
+    } catch (e) {
+      toast.error('Failed: ' + e.message)
+    }
+  }
+
+  if (loading) return <div className="loading-screen"><div className="spinner" /></div>
 
   return (
-    <div>
+    <>
       <div className="page-header">
-        <div>
-          <h1 className="page-title">User Management 👤</h1>
-          <p className="page-subtitle">Manage delivery boy accounts</p>
+        <div className="page-header-left">
+          <h1>🔑 Users</h1>
+          <p>{dbs.length} delivery boys</p>
         </div>
-        <button className="btn btn-primary" onClick={() => setModal(true)}>+ Add Delivery Boy</button>
+        <button className="btn btn-primary" onClick={() => setShowModal(true)}>+ Add Delivery Boy</button>
       </div>
 
-      {/* Login info box */}
-      <div style={{ background: 'var(--sky-pale)', border: '1px solid var(--sky-light)', borderRadius: 12, padding: '14px 18px', marginBottom: 24 }}>
-        <div style={{ fontWeight: 800, color: 'var(--ocean)', marginBottom: 8 }}>ℹ️ How Logins Work</div>
-        <div style={{ fontSize: 13, color: 'var(--gray-700)', display: 'grid', gap: 4 }}>
-          <div>🔐 <strong>Admin:</strong> Uses email + password (set in Supabase)</div>
-          <div>🚚 <strong>Delivery Boys:</strong> Admin creates account here with phone + password</div>
-          <div>👥 <strong>Customers:</strong> Self-register at <strong>/register</strong> using their phone number</div>
-          <div>🌐 <strong>All roles use the same login page</strong> — role is auto-detected</div>
-        </div>
-      </div>
-
-      {/* Delivery Boys List */}
-      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--gray-100)' }}>
-          <h2 style={{ fontSize: 16, fontWeight: 800 }}>🚚 Delivery Boys ({deliveryBoys.length})</h2>
-        </div>
-        {deliveryBoys.length === 0 ? (
-          <div className="empty-state">
-            <div className="icon">🚚</div>
-            <p>No delivery boys added yet</p>
-            <span>Click "Add Delivery Boy" to create an account</span>
-          </div>
-        ) : (
-          <div className="table-wrap">
+      <div className="page-body">
+        <div className="card">
+          <div className="table-wrapper">
             <table>
-              <thead>
-                <tr><th>Name</th><th>Primary Phone</th><th>Other Phones</th><th>Status</th><th>Actions</th></tr>
-              </thead>
+              <thead><tr><th>Name</th><th>Phone</th><th>Status</th><th>Actions</th></tr></thead>
               <tbody>
-                {deliveryBoys.map(b => (
-                  <tr key={b.id}>
-                    <td style={{ fontWeight: 700 }}>{b.name}</td>
-                    <td>📞 {b.primary_phone}</td>
-                    <td style={{ fontSize: 13, color: 'var(--gray-500)' }}>
-                      {b.phones?.filter(p => p !== b.primary_phone).join(', ') || '—'}
-                    </td>
+                {dbs.length === 0 ? (
+                  <tr><td colSpan={4}><div className="empty-state"><span className="empty-icon">👤</span><h3>No delivery boys</h3><p>Add your first delivery boy</p></div></td></tr>
+                ) : dbs.map(d => (
+                  <tr key={d.id}>
+                    <td><div className="cell-main">{d.name}</div></td>
+                    <td>{d.primary_phone}</td>
                     <td>
-                      <span className={`badge ${b.is_active ? 'badge-green' : 'badge-red'}`}>
-                        {b.is_active ? '✅ Active' : '❌ Inactive'}
+                      <span className={`badge ${d.is_active ? 'badge-delivered' : 'badge-cancelled'}`}>
+                        <span className="dot" />{d.is_active ? 'Active' : 'Inactive'}
                       </span>
                     </td>
                     <td>
-                      <button className={`btn btn-sm ${b.is_active ? 'btn-danger' : 'btn-success'}`}
-                        onClick={() => toggleActive(b)}>
-                        {b.is_active ? 'Deactivate' : 'Activate'}
-                      </button>
+                      <div className="btn-group">
+                        <button className={`btn btn-sm ${d.is_active ? 'btn-warning' : 'btn-success'}`} onClick={() => toggle(d)}>
+                          {d.is_active ? '⏸' : '▶'}
+                        </button>
+                        <button className="btn btn-sm btn-ghost" style={{ color: 'var(--rose-500)' }} onClick={() => del(d)}>🗑️</button>
+                      </div>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-        )}
+        </div>
+
+        <div className="card">
+          <div className="card-header"><h3>ℹ️ How Delivery Boy Login Works</h3></div>
+          <div className="card-body">
+            <div className="alert alert-info" style={{ marginBottom: 0 }}>
+              <div>
+                <strong>1.</strong> You create the account here with phone + password<br />
+                <strong>2.</strong> Delivery boy opens the app and goes to <strong>/login</strong><br />
+                <strong>3.</strong> They enter their phone number and the password you set<br />
+                <strong>4.</strong> They're automatically redirected to the delivery panel
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
-      {/* Add Delivery Boy Modal */}
-      {modal && (
-        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setModal(false)}>
-          <div className="modal">
-            <h2 className="modal-title">Add Delivery Boy 🚚</h2>
-            <form onSubmit={createDeliveryBoy}>
+      {showModal && (
+        <div className="modal-overlay" onClick={() => !creating && setShowModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Add Delivery Boy</h3>
+              <button className="modal-close" onClick={() => !creating && setShowModal(false)} disabled={creating}>✕</button>
+            </div>
+            <div className="modal-body">
               <div className="form-group">
-                <label className="form-label">Full Name *</label>
-                <input className="form-input" value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} placeholder="Delivery boy name" />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Primary Phone * (used for login)</label>
-                <div style={{ position: 'relative' }}>
-                  <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--gray-500)', fontSize: 14 }}>+91</span>
-                  <input className="form-input" type="tel" maxLength={10} placeholder="9876543210"
-                    value={form.primary_phone} onChange={e => setForm(p => ({ ...p, primary_phone: e.target.value.replace(/\D/g, '') }))}
-                    style={{ paddingLeft: 44 }} />
-                </div>
+                <label>Full Name *</label>
+                <input className="form-control" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="e.g., Raju Kumar" disabled={creating} />
               </div>
               <div className="form-group">
-                <label className="form-label">Alternate Phone 1 (optional)</label>
-                <div style={{ position: 'relative' }}>
-                  <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--gray-500)', fontSize: 14 }}>+91</span>
-                  <input className="form-input" type="tel" maxLength={10} placeholder="9876543210"
-                    value={extraPhone[0]} onChange={e => setExtraPhone(p => [e.target.value.replace(/\D/g, ''), p[1]])}
-                    style={{ paddingLeft: 44 }} />
-                </div>
+                <label>Phone (Primary) * — used for login</label>
+                <input className="form-control" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} placeholder="10-digit number" maxLength={10} disabled={creating} />
+              </div>
+              <div className="form-row">
+                <div className="form-group"><label>Phone 2</label><input className="form-control" value={form.phone2} onChange={e => setForm({ ...form, phone2: e.target.value })} maxLength={10} disabled={creating} /></div>
+                <div className="form-group"><label>Phone 3</label><input className="form-control" value={form.phone3} onChange={e => setForm({ ...form, phone3: e.target.value })} maxLength={10} disabled={creating} /></div>
               </div>
               <div className="form-group">
-                <label className="form-label">Alternate Phone 2 (optional)</label>
-                <div style={{ position: 'relative' }}>
-                  <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--gray-500)', fontSize: 14 }}>+91</span>
-                  <input className="form-input" type="tel" maxLength={10} placeholder="9876543210"
-                    value={extraPhone[1]} onChange={e => setExtraPhone(p => [p[0], e.target.value.replace(/\D/g, '')])}
-                    style={{ paddingLeft: 44 }} />
-                </div>
+                <label>Password * — share this with the delivery boy</label>
+                <input type="text" className="form-control" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} placeholder="Min 6 characters (visible for sharing)" disabled={creating} />
+                <div className="form-hint">Password is shown as text so you can share it</div>
               </div>
-              <div className="form-group">
-                <label className="form-label">Password * (min 6 characters)</label>
-                <input className="form-input" type="password" placeholder="••••••••"
-                  value={form.password} onChange={e => setForm(p => ({ ...p, password: e.target.value }))} />
-              </div>
-              <div style={{ background: 'var(--sky-pale)', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 13, color: 'var(--ocean)' }}>
-                ℹ️ The delivery boy will login at <strong>/login</strong> using their primary phone number and this password
-              </div>
-              <div className="modal-footer">
-                <button type="button" className="btn btn-ghost" onClick={() => setModal(false)}>Cancel</button>
-                <button type="submit" className="btn btn-primary" disabled={saving}>
-                  {saving ? 'Creating...' : '✅ Create Account'}
-                </button>
-              </div>
-            </form>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-ghost" onClick={() => setShowModal(false)} disabled={creating}>Cancel</button>
+              <button className="btn btn-primary" onClick={create} disabled={creating}>
+                {creating ? '⏳ Creating account...' : 'Create Account →'}
+              </button>
+            </div>
           </div>
         </div>
       )}
-    </div>
+    </>
   )
 }

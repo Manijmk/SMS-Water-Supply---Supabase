@@ -1,225 +1,233 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '../supabase/client'
 import toast from 'react-hot-toast'
 
-const VEHICLES = ['2-Wheeler', '3-Wheeler (Auto)', '4-Wheeler (Tempo)']
 const AREAS = ['Tondiarpet', 'New Washermanpet', 'Kaladipet', 'Tollgate', 'Thiruvotriyur']
-const today = new Date().toISOString().split('T')[0]
-const EMPTY = { vehicle: VEHICLES[0], route: AREAS[0], delivery_boy: '', loaded_cans: '', trip_number: 1, date: today, notes: '' }
+const VEHICLES = ['2-Wheeler', '3-Wheeler (Auto)', '4-Wheeler (Tempo)']
+const VIcon = v => v === '2-Wheeler' ? '🏍️' : v?.includes('3') ? '🛺' : '🚛'
 
 export default function Trips() {
+  const today = new Date().toISOString().split('T')[0]
   const [trips, setTrips] = useState([])
-  const [deliveries, setDeliveries] = useState([])
+  const [dbs, setDbs] = useState([])
+  const [date, setDate] = useState(today)
+  const [showModal, setShowModal] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [modal, setModal] = useState(false)
-  const [editing, setEditing] = useState(null)
-  const [form, setForm] = useState(EMPTY)
-  const [dateFilter, setDateFilter] = useState(today)
   const [saving, setSaving] = useState(false)
+  const [form, setForm] = useState({ vehicle: '3-Wheeler (Auto)', trip_number: 1, delivery_boy: '', route: '', loaded_cans: 0, notes: '' })
 
-  const loadTrips = useCallback(async () => {
-    const { data } = await supabase.from('trips').select('*').eq('date', dateFilter).order('trip_number')
-    setTrips(data || [])
-    setLoading(false)
-  }, [dateFilter])
+  const dateRef = useRef(date)
+  const fetchRef = useRef(null)
 
-  const loadDeliveries = useCallback(async () => {
-    const { data } = await supabase.from('deliveries').select('*').eq('date', dateFilter)
-    setDeliveries(data || [])
-  }, [dateFilter])
+  useEffect(() => { dateRef.current = date }, [date])
+
+  const fetchTrips = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('trips')
+        .select('*')
+        .eq('date', dateRef.current)
+        .order('trip_number')
+      if (error) throw error
+
+      // Enrich with delivery stats
+      const enriched = await Promise.all(
+        (data || []).map(async t => {
+          const { data: d } = await supabase
+            .from('deliveries')
+            .select('delivered, payment_received, empty_collected')
+            .eq('trip_id', t.id)
+          return {
+            ...t,
+            totalDel: d?.reduce((s, x) => s + (x.delivered || 0), 0) || 0,
+            totalCash: d?.reduce((s, x) => s + (x.payment_received || 0), 0) || 0,
+            totalEmp: d?.reduce((s, x) => s + (x.empty_collected || 0), 0) || 0,
+            count: d?.length || 0,
+          }
+        })
+      )
+      setTrips(enriched)
+    } catch (err) {
+      console.error('Fetch trips error:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { fetchRef.current = fetchTrips }, [fetchTrips])
+
+  const fetchDBs = async () => {
+    const { data } = await supabase.from('delivery_boys').select('*').eq('is_active', true)
+    setDbs(data || [])
+  }
 
   useEffect(() => {
-    setLoading(true)
-    loadTrips()
-    loadDeliveries()
+    fetchTrips()
+    fetchDBs()
 
     const channel = supabase
-      .channel(`trips-${dateFilter}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, (payload) => {
-        if (payload.eventType === 'INSERT') {
-          setTrips(prev => [...prev, payload.new].sort((a, b) => a.trip_number - b.trip_number))
-        } else if (payload.eventType === 'UPDATE') {
-          setTrips(prev => prev.map(t => t.id === payload.new.id ? { ...t, ...payload.new } : t))
-        } else if (payload.eventType === 'DELETE') {
-          setTrips(prev => prev.filter(t => t.id !== payload.old.id))
-        }
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, (payload) => {
-        if (payload.eventType === 'INSERT') {
-          setDeliveries(prev => [...prev, payload.new])
-        } else if (payload.eventType === 'UPDATE') {
-          setDeliveries(prev => prev.map(d => d.id === payload.new.id ? { ...d, ...payload.new } : d))
-        } else if (payload.eventType === 'DELETE') {
-          setDeliveries(prev => prev.filter(d => d.id !== payload.old.id))
-        }
-      })
+      .channel('trips-rt-' + Date.now())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, () => fetchRef.current?.())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, () => fetchRef.current?.())
       .subscribe()
 
     return () => supabase.removeChannel(channel)
-  }, [dateFilter, loadTrips, loadDeliveries])
+  }, [])
 
-  function openAdd() { setForm({ ...EMPTY, date: dateFilter }); setEditing(null); setModal(true) }
-  function openEdit(t) { setForm({ ...t }); setEditing(t.id); setModal(true) }
+  useEffect(() => { fetchTrips() }, [date])
 
-  async function save() {
-    if (!form.delivery_boy || !form.loaded_cans) return toast.error('Fill delivery boy and loaded cans')
+  const add = async () => {
+    if (!form.delivery_boy) return toast.error('Select delivery boy')
     setSaving(true)
-    const data = { ...form, loaded_cans: +form.loaded_cans, trip_number: +form.trip_number }
-    delete data.id
-    const { error } = editing
-      ? await supabase.from('trips').update(data).eq('id', editing)
-      : await supabase.from('trips').insert({ ...data, status: 'pending' })
-    if (error) toast.error('Error: ' + error.message)
-    else { toast.success(editing ? 'Trip updated!' : 'Trip created!'); setModal(false) }
-    setSaving(false)
-  }
-
-  async function del(id) {
-    if (!confirm('Delete this trip?')) return
-    setTrips(prev => prev.filter(t => t.id !== id))
-    const { error } = await supabase.from('trips').delete().eq('id', id)
-    if (error) { toast.error('Error'); loadTrips() }
-    else toast.success('Deleted')
-  }
-
-  async function updateStatus(id, status) {
-    // Optimistic instant update
-    setTrips(prev => prev.map(t => t.id === id ? { ...t, status } : t))
-    const { error } = await supabase.from('trips').update({ status }).eq('id', id)
-    if (error) { toast.error('Error'); loadTrips() }
-    else toast.success('Status updated!')
-  }
-
-  function getTripStats(tripId) {
-    const td = deliveries.filter(d => d.trip_id === tripId)
-    return {
-      delivered: td.reduce((s, d) => s + (d.delivered || 0), 0),
-      empties: td.reduce((s, d) => s + (d.empty_collected || 0), 0),
-      cash: td.reduce((s, d) => s + (d.payment_received || 0), 0),
+    try {
+      const { error } = await supabase.from('trips').insert({
+        vehicle: form.vehicle,
+        trip_number: parseInt(form.trip_number) || 1,
+        delivery_boy: form.delivery_boy,
+        route: form.route,
+        loaded_cans: parseInt(form.loaded_cans) || 0,
+        date: dateRef.current,
+        status: 'pending',
+        notes: form.notes,
+      })
+      if (error) throw error
+      toast.success('Trip created!')
+      setShowModal(false)
+      setForm({ vehicle: '3-Wheeler (Auto)', trip_number: 1, delivery_boy: '', route: '', loaded_cans: 0, notes: '' })
+    } catch (e) {
+      toast.error('Failed: ' + e.message)
+    } finally {
+      setSaving(false)
     }
   }
 
-  const totalLoaded = trips.reduce((s, t) => s + (t.loaded_cans || 0), 0)
-  const f = (k, v) => setForm(p => ({ ...p, [k]: v }))
+  const updateStatus = async (id, s) => {
+    try {
+      const { error } = await supabase.from('trips').update({ status: s }).eq('id', id)
+      if (error) throw error
+      toast.success(`Trip → ${s}`)
+    } catch (e) {
+      toast.error('Failed: ' + e.message)
+    }
+  }
 
-  if (loading) return <div className="loading"><div className="spinner" />Loading trips...</div>
+  const del = async id => {
+    if (!confirm('Delete trip?')) return
+    try {
+      const { error } = await supabase.from('trips').delete().eq('id', id)
+      if (error) throw error
+      toast.success('Deleted')
+    } catch (e) {
+      toast.error('Failed: ' + e.message)
+    }
+  }
+
+  if (loading) return <div className="loading-screen"><div className="spinner" /></div>
 
   return (
-    <div>
+    <>
       <div className="page-header">
-        <div>
-          <h1 className="page-title">Trips 🚚</h1>
-          <p className="page-subtitle">{trips.length} trips • {totalLoaded} cans loaded <span style={{ color: 'var(--green)', fontWeight: 700 }}>● live</span></p>
+        <div className="page-header-left">
+          <h1>🚛 Trips</h1>
+          <p>{trips.length} trips for {date}</p>
         </div>
-        <button className="btn btn-primary" onClick={openAdd}>+ Create Trip</button>
+        <button className="btn btn-primary" onClick={() => setShowModal(true)}>+ New Trip</button>
       </div>
 
-      <div style={{ display: 'flex', gap: 10, marginBottom: 20 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'white', border: '2px solid var(--gray-200)', borderRadius: 8, padding: '8px 14px' }}>
-          <span>📅</span>
-          <input type="date" value={dateFilter} onChange={e => setDateFilter(e.target.value)}
-            style={{ border: 'none', fontSize: 14, fontFamily: 'Nunito', outline: 'none' }} />
+      <div className="page-body">
+        <div className="toolbar">
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label>Date</label>
+            <input type="date" className="form-control" value={date} onChange={e => setDate(e.target.value)} />
+          </div>
         </div>
-      </div>
 
-      {trips.length === 0 ? (
-        <div className="empty-state"><div className="icon">🚚</div><p>No trips for this date</p></div>
-      ) : (
-        <div style={{ display: 'grid', gap: 12 }}>
-          {trips.map(t => {
-            const stats = getTripStats(t.id)
-            const progress = t.loaded_cans > 0 ? Math.round((stats.delivered / t.loaded_cans) * 100) : 0
-            return (
-              <div key={t.id} className="card">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 10 }}>
-                  <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
-                    <div style={{ fontSize: 32 }}>{t.vehicle?.includes('4') ? '🚛' : t.vehicle?.includes('3') ? '🛺' : '🏍️'}</div>
-                    <div>
-                      <div style={{ fontWeight: 800, fontSize: 16 }}>Trip #{t.trip_number} — {t.vehicle}</div>
-                      <div style={{ color: 'var(--gray-500)', fontSize: 13, marginTop: 2 }}>📍 {t.route} &nbsp;•&nbsp; 👤 {t.delivery_boy}</div>
-                      {t.notes && <div style={{ color: 'var(--gray-500)', fontSize: 12, marginTop: 4 }}>📝 {t.notes}</div>}
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
-                    <div style={{ background: 'var(--sky-light)', color: 'var(--ocean)', fontWeight: 800, fontSize: 18, padding: '6px 16px', borderRadius: 8 }}>{t.loaded_cans} cans</div>
-                    <select value={t.status || 'pending'} onChange={e => updateStatus(t.id, e.target.value)}
-                      style={{ border: '2px solid var(--gray-200)', borderRadius: 8, padding: '5px 10px', fontWeight: 700, fontSize: 13, cursor: 'pointer',
-                        color: t.status === 'completed' ? '#166534' : t.status === 'in_progress' ? '#1e40af' : '#9a3412' }}>
-                      <option value="pending">⏳ Pending</option>
-                      <option value="in_progress">🚚 In Progress</option>
-                      <option value="completed">✅ Completed</option>
-                    </select>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <button className="btn btn-ghost btn-sm" onClick={() => openEdit(t)}>✏️ Edit</button>
-                      <button className="btn btn-danger btn-sm" onClick={() => del(t.id)}>🗑️</button>
-                    </div>
-                  </div>
+        {trips.length === 0 ? (
+          <div className="empty-state">
+            <span className="empty-icon">🚛</span>
+            <h3>No trips created</h3>
+            <p>Create a trip to dispatch deliveries</p>
+          </div>
+        ) : (
+          <div className="trip-grid">
+            {trips.map(t => (
+              <div key={t.id} className="card" style={{ marginBottom: 0 }}>
+                <div className="card-header">
+                  <h3>{VIcon(t.vehicle)} Trip #{t.trip_number}</h3>
+                  <span className={`badge badge-${t.status}`}><span className="dot" />{t.status}</span>
                 </div>
-                <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--gray-100)' }}>
-                  <div style={{ display: 'flex', gap: 20, fontSize: 13, flexWrap: 'wrap', marginBottom: 8 }}>
-                    <span>✅ Delivered: <strong style={{ color: 'var(--green)' }}>{stats.delivered}</strong></span>
-                    <span>📦 Empties: <strong style={{ color: 'var(--sky)' }}>{stats.empties}</strong></span>
-                    <span>💰 Cash: <strong style={{ color: 'var(--orange)' }}>₹{stats.cash}</strong></span>
-                    <span>🔄 Remaining: <strong style={{ color: t.loaded_cans - stats.delivered > 0 ? 'var(--orange)' : 'var(--green)' }}>{t.loaded_cans - stats.delivered}</strong></span>
+                <div className="card-body compact">
+                  <div className="info-row"><span className="info-label">Delivery Boy</span><span className="info-value">{t.delivery_boy}</span></div>
+                  <div className="info-row"><span className="info-label">Vehicle</span><span className="info-value">{t.vehicle}</span></div>
+                  <div className="info-row"><span className="info-label">Route</span><span className="info-value">{t.route || '—'}</span></div>
+                  <div className="info-row"><span className="info-label">Loaded</span><span className="info-value">{t.loaded_cans} cans</span></div>
+                  <div className="info-row"><span className="info-label">Delivered</span><span className="info-value highlight">{t.totalDel} cans</span></div>
+                  <div className="info-row"><span className="info-label">Cash</span><span className="info-value">₹{t.totalCash?.toLocaleString()}</span></div>
+                  <div className="info-row"><span className="info-label">Empties</span><span className="info-value">{t.totalEmp}</span></div>
+                  <div className="card-actions">
+                    {t.status === 'pending' && <button className="btn btn-sm btn-primary" onClick={() => updateStatus(t.id, 'in_progress')}>▶ Start</button>}
+                    {t.status === 'in_progress' && <button className="btn btn-sm btn-success" onClick={() => updateStatus(t.id, 'completed')}>✓ Complete</button>}
+                    <button className="btn btn-sm btn-ghost" style={{ color: 'var(--rose-500)', marginLeft: 'auto' }} onClick={() => del(t.id)}>🗑️</button>
                   </div>
-                  {t.loaded_cans > 0 && (
-                    <div style={{ background: 'var(--gray-100)', borderRadius: 99, height: 8, overflow: 'hidden' }}>
-                      <div style={{ height: '100%', borderRadius: 99, background: progress >= 100 ? 'var(--green)' : 'var(--sky)', width: `${Math.min(progress, 100)}%`, transition: 'width 0.4s ease' }} />
-                    </div>
-                  )}
                 </div>
               </div>
-            )
-          })}
-        </div>
-      )}
+            ))}
+          </div>
+        )}
+      </div>
 
-      {modal && (
-        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setModal(false)}>
-          <div className="modal">
-            <h2 className="modal-title">{editing ? 'Edit Trip' : 'Create Trip 🚚'}</h2>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
+      {showModal && (
+        <div className="modal-overlay" onClick={() => setShowModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>New Trip</h3>
+              <button className="modal-close" onClick={() => setShowModal(false)}>✕</button>
+            </div>
+            <div className="modal-body">
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Vehicle</label>
+                  <select className="form-control" value={form.vehicle} onChange={e => setForm({ ...form, vehicle: e.target.value })}>
+                    {VEHICLES.map(v => <option key={v}>{v}</option>)}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Trip #</label>
+                  <input type="number" className="form-control" value={form.trip_number} onChange={e => setForm({ ...form, trip_number: e.target.value })} min={1} />
+                </div>
+              </div>
               <div className="form-group">
-                <label className="form-label">Vehicle</label>
-                <select className="form-select" value={form.vehicle} onChange={e => f('vehicle', e.target.value)}>
-                  {VEHICLES.map(v => <option key={v}>{v}</option>)}
+                <label>Delivery Boy *</label>
+                <select className="form-control" value={form.delivery_boy} onChange={e => setForm({ ...form, delivery_boy: e.target.value })}>
+                  <option value="">Select...</option>
+                  {dbs.map(d => <option key={d.id} value={d.name}>{d.name}</option>)}
                 </select>
               </div>
               <div className="form-group">
-                <label className="form-label">Trip #</label>
-                <input className="form-input" type="number" min={1} value={form.trip_number} onChange={e => f('trip_number', e.target.value)} />
-              </div>
-              <div className="form-group" style={{ gridColumn: '1/-1' }}>
-                <label className="form-label">Delivery Boy *</label>
-                <input className="form-input" value={form.delivery_boy} onChange={e => f('delivery_boy', e.target.value)} placeholder="Name of delivery boy" />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Route / Area</label>
-                <select className="form-select" value={form.route} onChange={e => f('route', e.target.value)}>
+                <label>Route / Area</label>
+                <select className="form-control" value={form.route} onChange={e => setForm({ ...form, route: e.target.value })}>
+                  <option value="">Select area...</option>
                   {AREAS.map(a => <option key={a}>{a}</option>)}
-                  <option value="Mixed">Mixed</option>
                 </select>
               </div>
               <div className="form-group">
-                <label className="form-label">Loaded Cans *</label>
-                <input className="form-input" type="number" min={1} value={form.loaded_cans} onChange={e => f('loaded_cans', e.target.value)} placeholder="e.g. 80" />
+                <label>Cans Loaded</label>
+                <input type="number" className="form-control" value={form.loaded_cans} onChange={e => setForm({ ...form, loaded_cans: e.target.value })} />
               </div>
               <div className="form-group">
-                <label className="form-label">Date</label>
-                <input className="form-input" type="date" value={form.date} onChange={e => f('date', e.target.value)} />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Notes</label>
-                <input className="form-input" value={form.notes || ''} onChange={e => f('notes', e.target.value)} placeholder="Optional" />
+                <label>Notes</label>
+                <textarea className="form-control" value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} rows={2} />
               </div>
             </div>
             <div className="modal-footer">
-              <button className="btn btn-ghost" onClick={() => setModal(false)}>Cancel</button>
-              <button className="btn btn-primary" onClick={save} disabled={saving}>{saving ? 'Saving...' : editing ? '✅ Update' : '🚚 Create'}</button>
+              <button className="btn btn-ghost" onClick={() => setShowModal(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={add} disabled={saving}>
+                {saving ? '⏳' : 'Create Trip →'}
+              </button>
             </div>
           </div>
         </div>
       )}
-    </div>
+    </>
   )
 }

@@ -1,79 +1,59 @@
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, useContext, useState, useEffect } from 'react'
 import { supabase } from '../supabase/client'
 
-const AuthContext = createContext()
-
-// Get role from user metadata — no database query needed, instant!
-function getRoleFromUser(user) {
-  return user?.user_metadata?.role || user?.app_metadata?.role || null
-}
+const AuthContext = createContext({})
+export const useAuth = () => useContext(AuthContext)
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
   const [role, setRole] = useState(null)
   const [linkedId, setLinkedId] = useState(null)
-  const [linkedData, setLinkedData] = useState(null)
   const [loading, setLoading] = useState(true)
 
+  const extractRole = (session) => {
+    if (!session?.user) {
+      setUser(null)
+      setRole(null)
+      setLinkedId(null)
+      setLoading(false)
+      return
+    }
+    const u = session.user
+    setUser(u)
+    const meta = u.user_metadata || {}
+    setRole(meta.role || 'customer')
+    setLinkedId(meta.linked_id || null)
+    setLoading(false)
+  }
+
   useEffect(() => {
-    // Get initial session — no DB calls, just read from token
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        setUser(session.user)
-        const r = getRoleFromUser(session.user)
-        setRole(r || 'admin')
-        setLinkedId(session.user.user_metadata?.linked_id || null)
-      }
-      setLoading(false)
-    }).catch(() => setLoading(false))
-
-    // Listen for auth state changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === 'SIGNED_OUT' || !session) {
-        setUser(null)
-        setRole(null)
-        setLinkedId(null)
-        setLinkedData(null)
-        setLoading(false)
-        return
-      }
-      if (session?.user) {
-        setUser(session.user)
-        const r = getRoleFromUser(session.user)
-        setRole(r || 'admin')
-        setLinkedId(session.user.user_metadata?.linked_id || null)
-      }
-      setLoading(false)
-    })
-
+    supabase.auth.getSession().then(({ data: { session } }) => extractRole(session))
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => extractRole(session))
     return () => subscription.unsubscribe()
   }, [])
 
-  // Load linked data (customer/delivery record) when linkedId is set
-  useEffect(() => {
-    if (!linkedId || !role) return
-    if (role === 'customer') {
-      supabase.from('customers').select('*').eq('id', linkedId).maybeSingle()
-        .then(({ data }) => { if (data) setLinkedData(data) })
-    } else if (role === 'delivery') {
-      supabase.from('delivery_boys').select('*').eq('id', linkedId).maybeSingle()
-        .then(({ data }) => { if (data) setLinkedData(data) })
-    }
-  }, [linkedId, role])
+  const signIn = async (email, password) => {
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+    if (error) throw error
+    return data
+  }
 
-  const logout = async () => {
+  const signUp = async (email, password, metadata = {}) => {
+    const { data, error } = await supabase.auth.signUp({ email, password, options: { data: metadata } })
+    if (error) throw error
+    return data
+  }
+
+  const signOut = async () => {
     await supabase.auth.signOut()
     setUser(null)
     setRole(null)
     setLinkedId(null)
-    setLinkedData(null)
   }
 
   return (
-    <AuthContext.Provider value={{ user, role, linkedId, linkedData, loading, logout }}>
+    <AuthContext.Provider value={{ user, role, linkedId, loading, signIn, signUp, signOut }}>
       {children}
     </AuthContext.Provider>
   )
 }
-
-export const useAuth = () => useContext(AuthContext)
