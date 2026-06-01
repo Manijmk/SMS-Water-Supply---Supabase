@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { supabase } from '../supabase/client'
 import { useAuth } from '../context/AuthContext'
 import toast from 'react-hot-toast'
+import EmptyCanAlert from '../components/EmptyCanTracker/EmptyCanAlert'
 
 export default function DeliveryBoy() {
   const { user, signOut } = useAuth()
@@ -20,6 +21,7 @@ export default function DeliveryBoy() {
   const [submitting, setSubmitting] = useState(false)
   const [summary, setSummary] = useState({ del: 0, cash: 0, emp: 0, count: 0 })
   const [mf, setMf] = useState({ delivered: 1, empty_collected: 0, payment_received: 0, payment_mode: 'cash' })
+  const [criticalAck, setCriticalAck] = useState(false)
 
   // Refs for realtime callbacks
   const selTripRef = useRef(selTrip)
@@ -144,6 +146,7 @@ export default function DeliveryBoy() {
       return
     }
     setMarkTarget(o)
+    setCriticalAck(false)
     setMf({
       delivered: o.quantity || 1,
       empty_collected: 0,
@@ -428,6 +431,14 @@ export default function DeliveryBoy() {
                               }
                               return null
                             })()}
+
+                            <EmptyCanAlert
+                              customerId={o.customer_id}
+                              customerName={o.customer_name}
+                              onProceed={() => setCriticalAck(true)}
+                              onCollected={() => fetchCustomers()}
+                              showTamil={false}
+                            />
 
                             <div className="card-actions">
                               <button

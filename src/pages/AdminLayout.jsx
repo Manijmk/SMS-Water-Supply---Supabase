@@ -10,6 +10,7 @@ const links = [
   { to: '/trips', icon: '🚛', label: 'Trips' },
   { to: '/deliveries', icon: '📦', label: 'Deliveries' },
   { to: '/reports', icon: '📈', label: 'Reports' },
+  { to: '/empty-cans', icon: '🪣', label: 'Empty Cans' },
   { to: '/users', icon: '🔑', label: 'Users' },
 ]
 

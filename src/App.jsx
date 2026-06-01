@@ -13,6 +13,7 @@ import Reports from './pages/Reports'
 import AdminUsers from './pages/AdminUsers'
 import DeliveryBoy from './pages/DeliveryBoy'
 import CustomerPanel from './pages/CustomerPanel'
+import EmptyCanTracker from './components/EmptyCanTracker/EmptyCanTracker'
 
 function ProtectedRoute({ children, allowedRoles }) {
   const { user, role, loading } = useAuth()
@@ -38,6 +39,7 @@ function AppRoutes() {
         <Route path="trips" element={<Trips />} />
         <Route path="deliveries" element={<Deliveries />} />
         <Route path="reports" element={<Reports />} />
+        <Route path="empty-cans" element={<EmptyCanTracker />} />
         <Route path="users" element={<AdminUsers />} />
       </Route>
       <Route path="/delivery" element={<ProtectedRoute allowedRoles={['delivery']}><DeliveryBoy /></ProtectedRoute>} />
