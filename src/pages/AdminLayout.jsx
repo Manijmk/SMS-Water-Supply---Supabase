@@ -11,6 +11,7 @@ const links = [
   { to: '/deliveries', icon: '📦', label: 'Deliveries' },
   { to: '/reports', icon: '📈', label: 'Reports' },
   { to: '/users', icon: '🔑', label: 'Users' },
+  { to: '/credit', icon: '💳', label: 'Credit Control' },
 ]
 
 export default function AdminLayout() {

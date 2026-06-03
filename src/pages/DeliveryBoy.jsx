@@ -2,11 +2,82 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../supabase/client'
 import { useAuth } from '../context/AuthContext'
+import { useLang } from '../hooks/useLang'
 import toast from 'react-hot-toast'
+import CreditAlert from '../components/CreditBlock/CreditAlert'
+
+const T = {
+  en: {
+    tabs:           ['🚛 Trips', '📦 Deliver', '📊 Summary'],
+    noTrips:        'No trips assigned today',
+    noTripsHint:    'Contact admin for trip assignment',
+    tapToView:      'Tap to view orders →',
+    selectTripHint: 'ℹ️ Select a trip from the Trips tab first',
+    goToTrips:      '← Go to Trips',
+    pending:        'Pending',
+    completed:      'Completed',
+    noOrdersRoute:  'No orders for this route',
+    formCans:       'Cans',
+    formEmpties:    'Empties',
+    formReceived:   'Received ₹',
+    formMode:       'Mode',
+    formExpected:   'Expected',
+    modeCash:       'Cash',
+    modeUpi:        'UPI',
+    modeCredit:     'Credit',
+    shortfall:      (n) => `Shortfall: ₹${n} will be added to due`,
+    markDelivered:  '📦 Mark Delivered',
+    confirmDel:     '✓ Confirm Delivery',
+    saving:         '⏳ Saving...',
+    cancel:         'Cancel',
+    summaryTitle:   "📊 Today's Totals",
+    statDel:        'Total Deliveries',
+    statCans:       'Cans Delivered',
+    statCash:       'Cash Collected',
+    statEmp:        'Empties Collected',
+    refreshSummary: '🔄 Refresh Summary',
+    refresh:        '🔄 Refresh',
+    switchLang:     'தமிழ்',
+  },
+  ta: {
+    tabs:           ['🚛 பயணங்கள்', '📦 டெலிவரி', '📊 சுருக்கம்'],
+    noTrips:        'இன்று பயணம் ஒதுக்கப்படவில்லை',
+    noTripsHint:    'பயண ஒதுக்கீட்டிற்கு அட்மினை தொடர்பு கொள்ளவும்',
+    tapToView:      'ஆர்டர்களை பார்க்க தட்டவும் →',
+    selectTripHint: 'ℹ️ முதலில் பயணங்கள் தாவலில் பயணம் தேர்ந்தெடுக்கவும்',
+    goToTrips:      '← பயணங்களுக்கு செல்',
+    pending:        'நிலுவையில்',
+    completed:      'முடிந்தது',
+    noOrdersRoute:  'இந்த வழிக்கு ஆர்டர்கள் இல்லை',
+    formCans:       'கேன்கள்',
+    formEmpties:    'காலிகள்',
+    formReceived:   'பெற்றது ₹',
+    formMode:       'முறை',
+    formExpected:   'எதிர்பார்ப்பு',
+    modeCash:       'பணம்',
+    modeUpi:        'யூபிஐ',
+    modeCredit:     'கடன்',
+    shortfall:      (n) => `குறைப்பணம்: ₹${n} நிலுவையில் சேரும்`,
+    markDelivered:  '📦 டெலிவர் செய்',
+    confirmDel:     '✓ டெலிவரி உறுதிசெய்',
+    saving:         '⏳ சேமிக்கிறது...',
+    cancel:         'ரத்துசெய்',
+    summaryTitle:   '📊 இன்றைய மொத்தம்',
+    statDel:        'மொத்த டெலிவரிகள்',
+    statCans:       'வழங்கிய கேன்கள்',
+    statCash:       'பணம் வசூல்',
+    statEmp:        'காலி வசூல்',
+    refreshSummary: '🔄 சுருக்கத்தை புதுப்பி',
+    refresh:        '🔄 புதுப்பி',
+    switchLang:     'EN',
+  },
+}
 
 export default function DeliveryBoy() {
   const { user, signOut } = useAuth()
   const navigate = useNavigate()
+  const [lang, toggleLang] = useLang()
+  const t = T[lang]
   const today = new Date().toISOString().split('T')[0]
   const name = user?.user_metadata?.name || 'Delivery Boy'
 
@@ -18,10 +89,10 @@ export default function DeliveryBoy() {
   const [markTarget, setMarkTarget] = useState(null)
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
+  const [creditClearance, setCreditClearance] = useState(true)
   const [summary, setSummary] = useState({ del: 0, cash: 0, emp: 0, count: 0 })
   const [mf, setMf] = useState({ delivered: 1, empty_collected: 0, payment_received: 0, payment_mode: 'cash' })
 
-  // Refs for realtime callbacks
   const selTripRef = useRef(selTrip)
   const customersRef = useRef(customers)
   const fetchRef = useRef(null)
@@ -29,7 +100,6 @@ export default function DeliveryBoy() {
   useEffect(() => { selTripRef.current = selTrip }, [selTrip])
   useEffect(() => { customersRef.current = customers }, [customers])
 
-  // ——— Data fetching ———
   const fetchTrips = useCallback(async () => {
     try {
       const { data, error } = await supabase
@@ -79,8 +149,6 @@ export default function DeliveryBoy() {
         .eq('delivery_boy', name)
 
       const ids = myTrips?.map(t => t.id) || []
-
-      // ★ FIX: Don't query with empty array — causes error
       if (ids.length === 0) {
         setSummary({ del: 0, cash: 0, emp: 0, count: 0 })
         return
@@ -111,30 +179,20 @@ export default function DeliveryBoy() {
 
   useEffect(() => { fetchRef.current = fetchAllData }, [fetchAllData])
 
-  // ——— Init & realtime ———
   useEffect(() => {
     fetchAllData()
 
     const channel = supabase
       .channel('delivery-boy-rt-' + Date.now())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => {
-        fetchRef.current?.()
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, () => {
-        fetchRef.current?.()
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, () => {
-        fetchRef.current?.()
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, () => {
-        fetchRef.current?.()
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => { fetchRef.current?.() })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'deliveries' }, () => { fetchRef.current?.() })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'trips' }, () => { fetchRef.current?.() })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, () => { fetchRef.current?.() })
       .subscribe()
 
     return () => supabase.removeChannel(channel)
   }, [])
 
-  // ——— Helpers ———
   const getCust = (id) => customersRef.current.find(c => c.id === id) || customers.find(c => c.id === id)
 
   const openMark = (o) => {
@@ -143,6 +201,7 @@ export default function DeliveryBoy() {
       toast.error('Customer data not loaded yet. Please wait and try again.')
       return
     }
+    setCreditClearance(true)
     setMarkTarget(o)
     setMf({
       delivered: o.quantity || 1,
@@ -152,23 +211,18 @@ export default function DeliveryBoy() {
     })
   }
 
-  // ★ KEY FIX: Complete delivery recording with full error handling
   const deliver = async (o) => {
-    // Validate trip
     const currentTrip = selTripRef.current
     if (!currentTrip) {
       toast.error('No trip selected! Go back and select a trip first.')
       return
     }
-
-    // Validate customer
     const c = getCust(o.customer_id)
     if (!c) {
       toast.error('Customer not found. Please refresh and try again.')
       return
     }
 
-    // Calculate amounts
     const cansDelivered = parseInt(mf.delivered) || 0
     const emptiesCollected = parseInt(mf.empty_collected) || 0
     const expectedAmount = cansDelivered * (c.price_per_can || 40)
@@ -181,9 +235,7 @@ export default function DeliveryBoy() {
     }
 
     setSubmitting(true)
-
     try {
-      // Step 1: Insert delivery record
       const { error: delErr } = await supabase.from('deliveries').insert({
         trip_id: currentTrip.id,
         customer_id: o.customer_id,
@@ -196,45 +248,19 @@ export default function DeliveryBoy() {
         payment_mode: mf.payment_mode,
         date: today,
       })
+      if (delErr) throw new Error('Failed to save delivery: ' + delErr.message)
 
-      if (delErr) {
-        console.error('Delivery insert error:', delErr)
-        throw new Error('Failed to save delivery: ' + delErr.message)
-      }
+      await supabase.from('orders').update({ status: 'delivered' }).eq('id', o.id)
 
-      // Step 2: Update order status
-      const { error: ordErr } = await supabase
-        .from('orders')
-        .update({ status: 'delivered' })
-        .eq('id', o.id)
-
-      if (ordErr) {
-        console.error('Order update error:', ordErr)
-        // Don't throw — delivery was saved
-      }
-
-      // Step 3: Update customer due + empties
       const newDue = (c.due_amount || 0) + balanceAmount
       const newEmpties = (c.empty_balance || 0) + cansDelivered - emptiesCollected
-
-      const { error: custErr } = await supabase
-        .from('customers')
-        .update({ due_amount: newDue, empty_balance: newEmpties })
-        .eq('id', c.id)
-
-      if (custErr) {
-        console.error('Customer update error:', custErr)
-        // Don't throw — delivery was saved
-      }
+      await supabase.from('customers').update({ due_amount: newDue, empty_balance: newEmpties }).eq('id', c.id)
 
       toast.success(`✅ Delivered to ${o.customer_name}!`)
       setMarkTarget(null)
-
-      // Refresh all data
       await fetchAllData()
     } catch (e) {
       toast.error(e.message || 'Delivery failed. Please try again.')
-      console.error('Deliver error:', e)
     } finally {
       setSubmitting(false)
     }
@@ -245,18 +271,19 @@ export default function DeliveryBoy() {
     navigate('/login')
   }
 
-  // ——— Filter orders for selected trip ———
   const tripOrders = selTrip
-    ? orders.filter(o => {
-        if (selTrip.route && selTrip.route.trim() !== '') {
-          return o.area === selTrip.route
-        }
-        return true // Show all if no route set
-      })
+    ? orders.filter(o => selTrip.route?.trim() ? o.area === selTrip.route : true)
     : []
 
   const pending = tripOrders.filter(o => o.status !== 'delivered')
-  const done = tripOrders.filter(o => o.status === 'delivered')
+  const done    = tripOrders.filter(o => o.status === 'delivered')
+
+  const deliveredToday = orders.filter(o => o.status === 'delivered').length
+  const totalToday     = orders.length
+  const deliveryPct    = totalToday > 0 ? Math.round((deliveredToday / totalToday) * 100) : 0
+  const ringR          = 40
+  const ringCirc       = 2 * Math.PI * ringR
+  const ringOffset     = ringCirc - (deliveryPct / 100) * ringCirc
 
   if (loading) {
     return (
@@ -276,55 +303,101 @@ export default function DeliveryBoy() {
             <h1>💧 SMS Water</h1>
             <p>👋 {name}</p>
           </div>
-          <button className="btn btn-sm btn-ghost" style={{ color: 'rgba(255,255,255,0.7)' }} onClick={handleLogout}>
-            🚪
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <button
+              onClick={toggleLang}
+              className="btn btn-sm btn-ghost"
+              style={{ color: 'rgba(255,255,255,0.9)', fontSize: 12, padding: '4px 10px', border: '1px solid rgba(255,255,255,0.3)', borderRadius: 20 }}
+            >
+              {t.switchLang}
+            </button>
+            <button className="btn btn-sm btn-ghost" style={{ color: 'rgba(255,255,255,0.7)' }} onClick={handleLogout}>
+              🚪
+            </button>
+          </div>
         </div>
+        {totalToday > 0 && (
+          <div className="header-progress-wrap">
+            <div className="header-progress-meta">
+              <span>{lang === 'ta' ? 'இன்றைய டெலிவரிகள்' : "Today's Deliveries"}</span>
+              <span>{deliveredToday}/{totalToday} {lang === 'ta' ? 'முடிந்தது' : 'done'}</span>
+            </div>
+            <div className="header-progress-track">
+              <div className="header-progress-fill" style={{ width: `${deliveryPct}%` }} />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Tabs */}
       <div className="mobile-tabs">
-        <button className={`mobile-tab ${tab === 'trips' ? 'active' : ''}`} onClick={() => { setTab('trips'); setSelTrip(null); setMarkTarget(null) }}>
-          🚛 Trips
-        </button>
-        <button className={`mobile-tab ${tab === 'orders' ? 'active' : ''}`} onClick={() => setTab('orders')}>
-          📦 Deliver
-        </button>
-        <button className={`mobile-tab ${tab === 'summary' ? 'active' : ''}`} onClick={() => { setTab('summary'); fetchSummary() }}>
-          📊 Summary
-        </button>
+        {['trips', 'orders', 'summary'].map((key, i) => (
+          <button
+            key={key}
+            className={`mobile-tab ${tab === key ? 'active' : ''}`}
+            onClick={() => {
+              if (key === 'trips') { setSelTrip(null); setMarkTarget(null) }
+              if (key === 'summary') fetchSummary()
+              setTab(key)
+            }}
+          >
+            {t.tabs[i]}
+          </button>
+        ))}
       </div>
 
-      <div className="mobile-content">
+      <div key={tab} className="mobile-content tab-fade">
+
         {/* ═══ TRIPS TAB ═══ */}
         {tab === 'trips' && (
           trips.length === 0 ? (
             <div className="empty-state">
               <span className="empty-icon">🚛</span>
-              <h3>No trips assigned today</h3>
-              <p>Contact admin for trip assignment</p>
-              <button className="btn btn-ghost btn-sm" onClick={fetchTrips} style={{ marginTop: 12 }}>🔄 Refresh</button>
+              <h3>{t.noTrips}</h3>
+              <p>{t.noTripsHint}</p>
+              <button className="btn btn-ghost btn-sm" onClick={fetchTrips} style={{ marginTop: 12 }}>{t.refresh}</button>
             </div>
           ) : (
-            trips.map((t, i) => (
+            trips.map((tr, i) => (
               <div
-                key={t.id}
+                key={tr.id}
                 className="info-card clickable"
-                onClick={() => { setSelTrip(t); setTab('orders'); setMarkTarget(null) }}
+                onClick={() => { setSelTrip(tr); setTab('orders'); setMarkTarget(null) }}
                 style={{ animationDelay: `${i * 0.05}s` }}
               >
                 <h4>
-                  {t.vehicle === '2-Wheeler' ? '🏍️' : t.vehicle?.includes('3') ? '🛺' : '🚛'}
-                  {' '}Trip #{t.trip_number}
+                  {tr.vehicle === '2-Wheeler' ? '🏍️' : tr.vehicle?.includes('3') ? '🛺' : '🚛'}
+                  {' '}{lang === 'ta' ? `பயணம் #${tr.trip_number}` : `Trip #${tr.trip_number}`}
                 </h4>
-                <div className="meta">{t.route || 'All areas'} · {t.loaded_cans} cans loaded</div>
-                <div className="info-row"><span className="info-label">Vehicle</span><span className="info-value">{t.vehicle}</span></div>
+                <div className="meta">{tr.route || (lang === 'ta' ? 'அனைத்து பகுதிகள்' : 'All areas')} · {tr.loaded_cans} {lang === 'ta' ? 'கேன்கள்' : 'cans loaded'}</div>
                 <div className="info-row">
-                  <span className="info-label">Status</span>
-                  <span className={`badge badge-${t.status}`}><span className="dot" />{t.status}</span>
+                  <span className="info-label">{lang === 'ta' ? 'வாகனம்' : 'Vehicle'}</span>
+                  <span className="info-value">{tr.vehicle}</span>
                 </div>
+                <div className="info-row">
+                  <span className="info-label">{lang === 'ta' ? 'நிலை' : 'Status'}</span>
+                  <span className={`badge badge-${tr.status}`}><span className="dot" />{tr.status}</span>
+                </div>
+                {(() => {
+                  const tOrds = tr.route?.trim() ? orders.filter(o => o.area === tr.route) : orders
+                  const tDone = tOrds.filter(o => o.status === 'delivered').length
+                  const tTotal = tOrds.length
+                  if (tTotal === 0) return null
+                  const tPct = Math.round((tDone / tTotal) * 100)
+                  return (
+                    <div className="trip-progress-bar">
+                      <div className="trip-progress-meta">
+                        <span>{tDone}/{tTotal} {lang === 'ta' ? 'டெலிவர் ஆனது' : 'delivered'}</span>
+                        <span>{tPct}%</span>
+                      </div>
+                      <div className="trip-bar-track">
+                        <div className="trip-bar-fill" style={{ width: `${tPct}%` }} />
+                      </div>
+                    </div>
+                  )
+                })()}
                 <div style={{ marginTop: 10, textAlign: 'center', color: 'var(--teal-500)', fontSize: 13, fontWeight: 700 }}>
-                  Tap to view orders →
+                  {t.tapToView}
                 </div>
               </div>
             ))
@@ -335,22 +408,21 @@ export default function DeliveryBoy() {
         {tab === 'orders' && (
           !selTrip ? (
             <div>
-              <div className="alert alert-info">ℹ️ Select a trip from the Trips tab first</div>
+              <div className="alert alert-info">{t.selectTripHint}</div>
               <button className="btn btn-primary" style={{ width: '100%' }} onClick={() => setTab('trips')}>
-                ← Go to Trips
+                {t.goToTrips}
               </button>
             </div>
           ) : (
             <>
               <div className="alert alert-info" style={{ borderColor: 'var(--teal-400)' }}>
-                📦 Trip #{selTrip.trip_number} — {selTrip.route || 'All areas'} — {selTrip.loaded_cans} cans
+                📦 {lang === 'ta' ? `பயணம் #${selTrip.trip_number}` : `Trip #${selTrip.trip_number}`} — {selTrip.route || (lang === 'ta' ? 'அனைத்து பகுதிகள்' : 'All areas')} — {selTrip.loaded_cans} {lang === 'ta' ? 'கேன்கள்' : 'cans'}
               </div>
 
-              {/* Pending Orders */}
               {pending.length > 0 && (
                 <>
                   <h4 style={{ fontSize: 14, fontWeight: 800, color: 'var(--n-600)', margin: '16px 0 8px' }}>
-                    ⏳ Pending ({pending.length})
+                    ⏳ {t.pending} ({pending.length})
                   </h4>
                   {pending.map(o => {
                     const c = getCust(o.customer_id)
@@ -364,54 +436,53 @@ export default function DeliveryBoy() {
                           📍 {c?.address || o.area} · 📞 {c?.primary_phone || c?.phone || '—'}
                         </div>
 
-                        <div className="info-row"><span className="info-label">Cans</span><span className="info-value">{o.quantity}</span></div>
-                        <div className="info-row"><span className="info-label">Rate</span><span className="info-value">₹{pricePerCan}/can</span></div>
-                        <div className="info-row"><span className="info-label">Total</span><span className="info-value highlight">₹{totalAmt}</span></div>
+                        <div className="info-row"><span className="info-label">{t.formCans}</span><span className="info-value">{o.quantity}</span></div>
+                        <div className="info-row"><span className="info-label">{lang === 'ta' ? 'விலை' : 'Rate'}</span><span className="info-value">₹{pricePerCan}/{lang === 'ta' ? 'கேன்' : 'can'}</span></div>
+                        <div className="info-row"><span className="info-label">{lang === 'ta' ? 'மொத்தம்' : 'Total'}</span><span className="info-value highlight">₹{totalAmt}</span></div>
 
                         {c?.due_amount > 0 && (
                           <div className="alert alert-danger" style={{ margin: '8px 0', padding: '8px 12px', fontSize: 12 }}>
-                            ⚠️ Existing due: ₹{c.due_amount}
+                            ⚠️ {lang === 'ta' ? `நிலுவை: ₹${c.due_amount}` : `Existing due: ₹${c.due_amount}`}
                           </div>
                         )}
 
                         {o.notes && (
-                          <div className="info-row"><span className="info-label">Notes</span><span className="info-value">{o.notes}</span></div>
+                          <div className="info-row"><span className="info-label">{lang === 'ta' ? 'குறிப்பு' : 'Notes'}</span><span className="info-value">{o.notes}</span></div>
                         )}
 
-                        {/* Mark Form */}
                         {markTarget?.id === o.id ? (
                           <div className="mark-form">
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                               <div className="form-group" style={{ marginBottom: 10 }}>
-                                <label>Cans</label>
+                                <label>{t.formCans}</label>
                                 <input type="number" className="form-control" value={mf.delivered}
                                   onChange={e => setMf({ ...mf, delivered: e.target.value })} min={0} disabled={submitting} />
                               </div>
                               <div className="form-group" style={{ marginBottom: 10 }}>
-                                <label>Empties</label>
+                                <label>{t.formEmpties}</label>
                                 <input type="number" className="form-control" value={mf.empty_collected}
                                   onChange={e => setMf({ ...mf, empty_collected: e.target.value })} min={0} disabled={submitting} />
                               </div>
                             </div>
 
                             <div className="amount-box">
-                              <div className="amount-label">Expected</div>
+                              <div className="amount-label">{t.formExpected}</div>
                               <div className="amount-value">₹{(parseInt(mf.delivered) || 0) * pricePerCan}</div>
                             </div>
 
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                               <div className="form-group" style={{ marginBottom: 10 }}>
-                                <label>Received ₹</label>
+                                <label>{t.formReceived}</label>
                                 <input type="number" className="form-control" value={mf.payment_received}
                                   onChange={e => setMf({ ...mf, payment_received: e.target.value })} min={0} disabled={submitting} />
                               </div>
                               <div className="form-group" style={{ marginBottom: 10 }}>
-                                <label>Mode</label>
+                                <label>{t.formMode}</label>
                                 <select className="form-control" value={mf.payment_mode}
                                   onChange={e => setMf({ ...mf, payment_mode: e.target.value })} disabled={submitting}>
-                                  <option value="cash">Cash</option>
-                                  <option value="upi">UPI</option>
-                                  <option value="credit">Credit</option>
+                                  <option value="cash">{t.modeCash}</option>
+                                  <option value="upi">{t.modeUpi}</option>
+                                  <option value="credit">{t.modeCredit}</option>
                                 </select>
                               </div>
                             </div>
@@ -422,24 +493,30 @@ export default function DeliveryBoy() {
                               if (paid < exp) {
                                 return (
                                   <div className="alert alert-warning" style={{ fontSize: 12, padding: '6px 10px', marginBottom: 10 }}>
-                                    Shortfall: ₹{exp - paid} will be added to due
+                                    {t.shortfall(exp - paid)}
                                   </div>
                                 )
                               }
                               return null
                             })()}
 
+                            <CreditAlert
+                              customerId={o.customer_id}
+                              onProceed={() => setCreditClearance(true)}
+                              showTamil={lang === 'ta'}
+                            />
+
                             <div className="card-actions">
                               <button
                                 className="btn btn-success"
                                 style={{ flex: 1 }}
                                 onClick={() => deliver(o)}
-                                disabled={submitting}
+                                disabled={submitting || !creditClearance}
                               >
-                                {submitting ? '⏳ Saving...' : '✓ Confirm Delivery'}
+                                {submitting ? t.saving : t.confirmDel}
                               </button>
                               <button className="btn btn-ghost" onClick={() => setMarkTarget(null)} disabled={submitting}>
-                                Cancel
+                                {t.cancel}
                               </button>
                             </div>
                           </div>
@@ -451,7 +528,7 @@ export default function DeliveryBoy() {
                               onClick={() => openMark(o)}
                               disabled={submitting}
                             >
-                              📦 Mark Delivered
+                              {t.markDelivered}
                             </button>
                           </div>
                         )}
@@ -461,16 +538,15 @@ export default function DeliveryBoy() {
                 </>
               )}
 
-              {/* Completed Orders */}
               {done.length > 0 && (
                 <>
                   <h4 style={{ fontSize: 14, fontWeight: 800, color: 'var(--emerald-500)', margin: '16px 0 8px' }}>
-                    ✅ Completed ({done.length})
+                    ✅ {t.completed} ({done.length})
                   </h4>
                   {done.map(o => (
                     <div key={o.id} className="info-card" style={{ opacity: 0.6 }}>
                       <h4>✅ {o.customer_name}</h4>
-                      <div className="meta">{o.area} · {o.quantity} cans</div>
+                      <div className="meta">{o.area} · {o.quantity} {lang === 'ta' ? 'கேன்கள்' : 'cans'}</div>
                     </div>
                   ))}
                 </>
@@ -479,9 +555,9 @@ export default function DeliveryBoy() {
               {tripOrders.length === 0 && (
                 <div className="empty-state">
                   <span className="empty-icon">📦</span>
-                  <h3>No orders for this route</h3>
-                  <p>Orders for "{selTrip.route || 'all areas'}" will appear here</p>
-                  <button className="btn btn-ghost btn-sm" onClick={fetchOrders} style={{ marginTop: 12 }}>🔄 Refresh</button>
+                  <h3>{t.noOrdersRoute}</h3>
+                  <p>"{selTrip.route || (lang === 'ta' ? 'அனைத்து பகுதிகள்' : 'all areas')}"</p>
+                  <button className="btn btn-ghost btn-sm" onClick={fetchOrders} style={{ marginTop: 12 }}>{t.refresh}</button>
                 </div>
               )}
             </>
@@ -491,24 +567,54 @@ export default function DeliveryBoy() {
         {/* ═══ SUMMARY TAB ═══ */}
         {tab === 'summary' && (
           <>
-            <div className="customer-stats">
-              <div className="mini-stat teal"><div className="mini-value">{summary.count}</div><div className="mini-label">Deliveries</div></div>
-              <div className="mini-stat emerald"><div className="mini-value">{summary.del}</div><div className="mini-label">Cans</div></div>
-              <div className="mini-stat amber"><div className="mini-value">₹{summary.cash.toLocaleString()}</div><div className="mini-label">Cash</div></div>
-              <div className="mini-stat teal"><div className="mini-value">{summary.emp}</div><div className="mini-label">Empties</div></div>
-            </div>
-
-            <div className="card">
-              <div className="card-header"><h3>📊 Today's Totals</h3></div>
-              <div className="card-body compact">
-                <div className="info-row"><span className="info-label">Total Deliveries</span><span className="info-value">{summary.count}</span></div>
-                <div className="info-row"><span className="info-label">Cans Delivered</span><span className="info-value">{summary.del}</span></div>
-                <div className="info-row"><span className="info-label">Cash Collected</span><span className="info-value highlight">₹{summary.cash.toLocaleString()}</span></div>
-                <div className="info-row"><span className="info-label">Empties Collected</span><span className="info-value">{summary.emp}</span></div>
+            <div className="summary-ring-wrap">
+              <div className="ring-svg-wrap">
+                <svg width="100" height="100" viewBox="0 0 100 100">
+                  <circle className="progress-ring-track" cx="50" cy="50" r={ringR} />
+                  <circle
+                    className="progress-ring-fill"
+                    cx="50" cy="50" r={ringR}
+                    strokeDasharray={ringCirc}
+                    strokeDashoffset={ringOffset}
+                    transform="rotate(-90, 50, 50)"
+                  />
+                </svg>
+                <div className="ring-center">
+                  <div className="ring-pct">{deliveryPct}%</div>
+                  <div className="ring-pct-label">{lang === 'ta' ? 'முடிந்தது' : 'Done'}</div>
+                </div>
+              </div>
+              <div className="ring-stats">
+                <div className="ring-stat-row">
+                  <span className="rs-label">{lang === 'ta' ? 'டெலிவரிகள்' : 'Deliveries'}</span>
+                  <span className="rs-value teal">{summary.count}</span>
+                </div>
+                <div className="ring-stat-row">
+                  <span className="rs-label">{lang === 'ta' ? 'கேன்கள்' : 'Cans'}</span>
+                  <span className="rs-value emerald">{summary.del}</span>
+                </div>
+                <div className="ring-stat-row">
+                  <span className="rs-label">{lang === 'ta' ? 'பணம்' : 'Cash'}</span>
+                  <span className="rs-value amber">₹{summary.cash.toLocaleString()}</span>
+                </div>
+                <div className="ring-stat-row">
+                  <span className="rs-label">{lang === 'ta' ? 'காலிகள்' : 'Empties'}</span>
+                  <span className="rs-value">{summary.emp}</span>
+                </div>
               </div>
             </div>
 
-            <button className="btn btn-ghost" style={{ width: '100%' }} onClick={fetchSummary}>🔄 Refresh Summary</button>
+            <div className="card">
+              <div className="card-header"><h3>{t.summaryTitle}</h3></div>
+              <div className="card-body compact">
+                <div className="info-row"><span className="info-label">{t.statDel}</span><span className="info-value">{summary.count}</span></div>
+                <div className="info-row"><span className="info-label">{t.statCans}</span><span className="info-value">{summary.del}</span></div>
+                <div className="info-row"><span className="info-label">{t.statCash}</span><span className="info-value highlight">₹{summary.cash.toLocaleString()}</span></div>
+                <div className="info-row"><span className="info-label">{t.statEmp}</span><span className="info-value">{summary.emp}</span></div>
+              </div>
+            </div>
+
+            <button className="btn btn-ghost" style={{ width: '100%' }} onClick={fetchSummary}>{t.refreshSummary}</button>
           </>
         )}
       </div>

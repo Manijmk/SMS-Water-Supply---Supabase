@@ -13,6 +13,7 @@ import Reports from './pages/Reports'
 import AdminUsers from './pages/AdminUsers'
 import DeliveryBoy from './pages/DeliveryBoy'
 import CustomerPanel from './pages/CustomerPanel'
+import CreditTracker from './components/CreditBlock/CreditTracker'
 
 function ProtectedRoute({ children, allowedRoles }) {
   const { user, role, loading } = useAuth()
@@ -39,6 +40,7 @@ function AppRoutes() {
         <Route path="deliveries" element={<Deliveries />} />
         <Route path="reports" element={<Reports />} />
         <Route path="users" element={<AdminUsers />} />
+        <Route path="credit" element={<CreditTracker />} />
       </Route>
       <Route path="/delivery" element={<ProtectedRoute allowedRoles={['delivery']}><DeliveryBoy /></ProtectedRoute>} />
       <Route path="/customer" element={<ProtectedRoute allowedRoles={['customer']}><CustomerPanel /></ProtectedRoute>} />
