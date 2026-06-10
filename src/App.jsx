@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import Login from './pages/Login'
@@ -14,6 +14,12 @@ import AdminUsers from './pages/AdminUsers'
 import DeliveryBoy from './pages/DeliveryBoy'
 import CustomerPanel from './pages/CustomerPanel'
 import CreditTracker from './components/CreditBlock/CreditTracker'
+import ContactImporter from './components/CustomerBulkUpload/ContactImporter'
+
+function ContactImporterPage() {
+  const navigate = useNavigate()
+  return <ContactImporter onComplete={() => navigate('/admin/customers')} />
+}
 
 function ProtectedRoute({ children, allowedRoles }) {
   const { user, role, loading } = useAuth()
@@ -35,6 +41,8 @@ function AppRoutes() {
       <Route path="/" element={<ProtectedRoute allowedRoles={['admin']}><AdminLayout /></ProtectedRoute>}>
         <Route index element={<Dashboard />} />
         <Route path="customers" element={<Customers />} />
+        <Route path="admin/customers" element={<Customers />} />
+        <Route path="admin/customers/import" element={<ContactImporterPage />} />
         <Route path="orders" element={<Orders />} />
         <Route path="trips" element={<Trips />} />
         <Route path="deliveries" element={<Deliveries />} />

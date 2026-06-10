@@ -1,8 +1,40 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { supabase } from '../supabase/client'
 import toast from 'react-hot-toast'
 
 const AREAS = ['All', 'Tondiarpet', 'New Washermanpet', 'Kaladipet', 'Tollgate', 'Thiruvotriyur']
+const VALID_AREAS = AREAS.filter(a => a !== 'All')
+
+function parseCSV(text) {
+  const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim().split('\n')
+  if (lines.length < 2) return []
+  const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_'))
+  return lines.slice(1).filter(l => l.trim()).map((line, idx) => {
+    // Handle quoted fields
+    const cols = []
+    let cur = '', inQ = false
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === '"') { inQ = !inQ }
+      else if (line[i] === ',' && !inQ) { cols.push(cur.trim()); cur = '' }
+      else { cur += line[i] }
+    }
+    cols.push(cur.trim())
+    const row = {}
+    headers.forEach((h, i) => { row[h] = cols[i] || '' })
+    return { _row: idx + 2, ...row }
+  })
+}
+
+function validateBulkRow(row) {
+  const errors = []
+  if (!row.name?.trim()) errors.push('Name required')
+  const area = row.area?.trim()
+  if (area && !VALID_AREAS.includes(area)) errors.push(`Area must be one of: ${VALID_AREAS.join(', ')}`)
+  const type = row.type?.trim()
+  if (type && type !== 'home' && type !== 'shop') errors.push('Type must be home or shop')
+  return errors
+}
 
 export default function Customers() {
   const [customers, setCustomers] = useState([])
@@ -17,6 +49,11 @@ export default function Customers() {
   const [editing, setEditing] = useState(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [showBulk, setShowBulk] = useState(false)
+  const [bulkRows, setBulkRows] = useState([])
+  const [bulkUploading, setBulkUploading] = useState(false)
+  const fileInputRef = useRef(null)
+  const navigate = useNavigate()
 
   const empty = {
     name: '', phone: '', phone2: '', phone3: '', address: '',
@@ -81,6 +118,68 @@ export default function Customers() {
     }
     setFiltered(f)
   }, [customers, area, typeFilter, search])
+
+  const downloadTemplate = () => {
+    const header = 'name,phone,phone2,phone3,address,area,type,price_per_can,empty_balance,due_amount,credit_enabled'
+    const example = 'Ravi Kumar,9876543210,,,12 Main St,Tondiarpet,home,40,0,0,false'
+    const csv = header + '\n' + example
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'customers_template.csv'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const handleCSVFile = (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const rows = parseCSV(ev.target.result)
+      if (rows.length === 0) return toast.error('No data rows found in CSV')
+      const annotated = rows.map(r => ({ ...r, _errors: validateBulkRow(r) }))
+      setBulkRows(annotated)
+      setShowBulk(true)
+    }
+    reader.readAsText(file)
+  }
+
+  const bulkInsert = async () => {
+    const valid = bulkRows.filter(r => r._errors.length === 0)
+    if (valid.length === 0) return toast.error('No valid rows to upload')
+    setBulkUploading(true)
+    const payload = valid.map(r => {
+      const phone = r.phone?.trim() || ''
+      const phones = [phone, r.phone2?.trim(), r.phone3?.trim()].filter(Boolean)
+      return {
+        name: r.name.trim(),
+        phone,
+        primary_phone: phone,
+        phones,
+        address: r.address?.trim() || '',
+        area: r.area?.trim() || 'Tondiarpet',
+        type: (r.type?.trim() === 'shop' ? 'shop' : 'home'),
+        price_per_can: parseInt(r.price_per_can) || 40,
+        empty_balance: parseInt(r.empty_balance) || 0,
+        due_amount: parseInt(r.due_amount) || 0,
+        credit_enabled: r.credit_enabled?.toLowerCase() === 'true',
+      }
+    })
+    try {
+      const { error } = await supabase.from('customers').insert(payload)
+      if (error) throw error
+      toast.success(`${payload.length} customers uploaded!`)
+      setShowBulk(false)
+      setBulkRows([])
+    } catch (e) {
+      toast.error('Upload failed: ' + e.message)
+    } finally {
+      setBulkUploading(false)
+    }
+  }
 
   const openAdd = () => {
     setEditing(null)
@@ -181,7 +280,13 @@ export default function Customers() {
           <h1>👥 Customers</h1>
           <p>{customers.length} total · {filtered.length} shown</p>
         </div>
-        <button className="btn btn-primary" onClick={openAdd}>+ Add Customer</button>
+        <div className="btn-group">
+          <button className="btn btn-ghost" onClick={downloadTemplate} title="Download CSV template">⬇️ Template</button>
+          <button className="btn btn-ghost" onClick={() => fileInputRef.current?.click()} title="Upload CSV file">⬆️ Bulk Upload</button>
+          <input ref={fileInputRef} type="file" accept=".csv" style={{ display: 'none' }} onChange={handleCSVFile} />
+          <button className="btn btn-ghost" onClick={() => navigate('/admin/customers/import')}>📱 Import from Contacts</button>
+          <button className="btn btn-primary" onClick={openAdd}>+ Add Customer</button>
+        </div>
       </div>
 
       <div className="page-body">
@@ -341,6 +446,67 @@ export default function Customers() {
               <button className="btn btn-ghost" onClick={() => setShowModal(false)}>Cancel</button>
               <button className="btn btn-primary" onClick={save} disabled={saving}>
                 {saving ? '⏳ Saving...' : editing ? 'Save Changes' : 'Add Customer'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Upload Preview Modal */}
+      {showBulk && (
+        <div className="modal-overlay" onClick={() => setShowBulk(false)}>
+          <div className="modal" style={{ maxWidth: 800, width: '95vw' }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>⬆️ Bulk Upload Preview</h3>
+              <button className="modal-close" onClick={() => setShowBulk(false)}>✕</button>
+            </div>
+            <div className="modal-body" style={{ padding: 0 }}>
+              <div style={{ padding: '12px 20px', background: 'var(--n-50)', borderBottom: '1px solid var(--n-200)', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                <span style={{ color: 'var(--green-600)', fontWeight: 600 }}>
+                  ✓ {bulkRows.filter(r => r._errors.length === 0).length} valid
+                </span>
+                {bulkRows.some(r => r._errors.length > 0) && (
+                  <span style={{ color: 'var(--rose-600)', fontWeight: 600 }}>
+                    ✗ {bulkRows.filter(r => r._errors.length > 0).length} errors (will be skipped)
+                  </span>
+                )}
+              </div>
+              <div style={{ overflowX: 'auto', maxHeight: 400, overflowY: 'auto' }}>
+                <table style={{ fontSize: 13 }}>
+                  <thead>
+                    <tr>
+                      <th>Row</th><th>Name</th><th>Phone</th><th>Area</th><th>Type</th><th>₹/Can</th><th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {bulkRows.map((r, i) => (
+                      <tr key={i} style={{ background: r._errors.length > 0 ? 'var(--rose-50, #fff1f2)' : undefined }}>
+                        <td style={{ color: 'var(--n-400)' }}>{r._row}</td>
+                        <td>{r.name || <em style={{ color: 'var(--rose-500)' }}>missing</em>}</td>
+                        <td>{r.phone || '—'}</td>
+                        <td>{r.area || '—'}</td>
+                        <td>{r.type || 'home'}</td>
+                        <td>{r.price_per_can || 40}</td>
+                        <td>
+                          {r._errors.length === 0
+                            ? <span style={{ color: 'var(--green-600)' }}>✓ OK</span>
+                            : <span style={{ color: 'var(--rose-600)', fontSize: 12 }}>{r._errors.join('; ')}</span>
+                          }
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-ghost" onClick={() => setShowBulk(false)}>Cancel</button>
+              <button
+                className="btn btn-primary"
+                onClick={bulkInsert}
+                disabled={bulkUploading || bulkRows.filter(r => r._errors.length === 0).length === 0}
+              >
+                {bulkUploading ? '⏳ Uploading...' : `Upload ${bulkRows.filter(r => r._errors.length === 0).length} Customers`}
               </button>
             </div>
           </div>

@@ -5,7 +5,10 @@
       "Bash(npm run *)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5173)",
       "Bash(node -e \"console.log\\(require\\('./node_modules/tailwindcss/package.json'\\).version\\)\")",
-      "Bash(del \"e:\\\\Projects\\\\SMS-Water-Supply---Supabase\\\\postcss.config.js\")"
+      "Bash(del \"e:\\\\Projects\\\\SMS-Water-Supply---Supabase\\\\postcss.config.js\")",
+      "Bash(ls -la \"e:\\\\Projects\\\\SMS-Water-Supply---Supabase\\\\\" | head -20)",
+      "Read(//e/Projects/**)",
+      "Bash(node -e \"require\\('xlsx'\\)\")"
     ]
   }
 }
